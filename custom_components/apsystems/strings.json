@@ -1,0 +1,65 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "APsystems Wechselrichter einrichten",
+        "description": "Verbindungsdaten und Namen für deinen Wechselrichter eingeben.",
+        "data": {
+          "ip_address": "IP-Adresse",
+          "port": "Port",
+          "device_name": "Gerätename"
+        },
+        "data_description": {
+          "ip_address": "Lokale IP-Adresse des Wechselrichters (statische IP empfohlen).",
+          "port": "API-Port des Wechselrichters (Standard: 8050).",
+          "device_name": "Frei wählbarer Name, z. B. 'Balkonkraftwerk' oder 'Garage Solar'."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Verbindung zum Wechselrichter fehlgeschlagen. IP-Adresse und Port prüfen."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "total_power": { "name": "Gesamtleistung" },
+      "total_power_p1": { "name": "Leistung Eingang 1" },
+      "total_power_p2": { "name": "Leistung Eingang 2" },
+      "today_production": { "name": "Energie Heute" },
+      "today_production_p1": { "name": "Energie Heute Eingang 1" },
+      "today_production_p2": { "name": "Energie Heute Eingang 2" },
+      "lifetime_production": { "name": "Energie Gesamt" },
+      "lifetime_production_p1": { "name": "Energie Gesamt Eingang 1" },
+      "lifetime_production_p2": { "name": "Energie Gesamt Eingang 2" }
+    },
+    "binary_sensor": {
+      "off_grid_status": { "name": "Netzausfall" },
+      "dc_1_short_circuit_error_status": { "name": "Kurzschluss Eingang 1" },
+      "dc_2_short_circuit_error_status": { "name": "Kurzschluss Eingang 2" },
+      "inverter_active": {
+        "name": "Wechselrichter Aktiv",
+        "state": {
+          "on": "In Betrieb",
+          "off": "Ausgeschaltet"
+        }
+      }
+    },
+    "number": {
+      "max_output": {
+        "name": "Leistungsbegrenzung",
+        "description": "Erlaubter Bereich: 30 W – 800 W (EZ1-M)"
+      }
+    },
+    "switch": {
+      "inverter_status": { "name": "Wechselrichter" }
+    }
+  },
+  "exceptions": {
+    "inverter_error": {
+      "message": "Der Wechselrichter hat einen Fehler zurückgegeben. Möglicherweise befindet er sich im Standby- oder Nachtmodus."
+    },
+    "inverter_unreachable": {
+      "message": "Der Wechselrichter ist nicht erreichbar. Netzwerkverbindung und IP-Adresse prüfen."
+    }
+  }
+}
