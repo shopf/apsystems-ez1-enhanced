@@ -22,36 +22,37 @@
   },
   "entity": {
     "sensor": {
-      "total_power": { "name": "Gesamtleistung" },
-      "total_power_p1": { "name": "Leistung Eingang 1" },
-      "total_power_p2": { "name": "Leistung Eingang 2" },
-      "today_production": { "name": "Energie Heute" },
-      "today_production_p1": { "name": "Energie Heute Eingang 1" },
-      "today_production_p2": { "name": "Energie Heute Eingang 2" },
-      "lifetime_production": { "name": "Energie Gesamt" },
-      "lifetime_production_p1": { "name": "Energie Gesamt Eingang 1" },
-      "lifetime_production_p2": { "name": "Energie Gesamt Eingang 2" }
+      "total_power": { "name": "Total output power" },
+      "total_power_p1": { "name": "Power from P1" },
+      "total_power_p2": { "name": "Power from P2" },
+      "today_production": { "name": "Today's production" },
+      "today_production_p1": { "name": "Production from P1 today" },
+      "today_production_p2": { "name": "Production from P2 today" },
+      "lifetime_production": { "name": "Total production over lifetime" },
+      "lifetime_production_p1": { "name": "Production from P1 over lifetime" },
+      "lifetime_production_p2": { "name": "Production from P2 over lifetime" },
+      "firmware_version": { "name": "Firmware version" }
     },
     "binary_sensor": {
-      "off_grid_status": { "name": "Netzausfall" },
-      "dc_1_short_circuit_error_status": { "name": "Kurzschluss Eingang 1" },
-      "dc_2_short_circuit_error_status": { "name": "Kurzschluss Eingang 2" },
+      "off_grid_status": { "name": "Grid fault" },
+      "dc_1_short_circuit_error_status": { "name": "DC 1 short circuit" },
+      "dc_2_short_circuit_error_status": { "name": "DC 2 short circuit" },
       "inverter_active": {
-        "name": "Wechselrichter Aktiv",
+        "name": "Inverter active",
         "state": {
-          "on": "In Betrieb",
-          "off": "Ausgeschaltet"
+          "on": "Operating",
+          "off": "Off"
         }
       }
     },
     "number": {
       "max_output": {
-        "name": "Leistungsbegrenzung",
-        "description": "Erlaubter Bereich: 30 W – 800 W (EZ1-M)"
+        "name": "Max output",
+        "description": "Allowed range: 30 W – 800 W (EZ1-M)"
       }
     },
     "switch": {
-      "inverter_status": { "name": "Wechselrichter" }
+      "inverter_status": { "name": "Inverter" }
     }
   },
   "exceptions": {
