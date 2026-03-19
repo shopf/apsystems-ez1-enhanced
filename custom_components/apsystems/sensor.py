@@ -18,6 +18,7 @@ from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import DiscoveryInfoType, StateType
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import ApSystemsConfigEntry, ApSystemsData, ApSystemsDataCoordinator
@@ -133,7 +134,7 @@ async def async_setup_entry(
 
 
 class ApSystemsSensorWithDescription(
-    CoordinatorEntity[ApSystemsDataCoordinator], ApSystemsEntity, SensorEntity
+    CoordinatorEntity[ApSystemsDataCoordinator], ApSystemsEntity, SensorEntity, RestoreEntity
 ):
     """Base sensor to be used with description."""
 
@@ -151,6 +152,23 @@ class ApSystemsSensorWithDescription(
         self.entity_description = entity_description
         self._attr_unique_id = f"{data.device_id}_{entity_description.key}"
 
+    async def async_added_to_hass(self) -> None:
+        """Restore last known state on HA startup if coordinator has no data yet.
+
+        This prevents sensors from showing as unavailable immediately after a
+        HA restart when the inverter is still offline (e.g. at night).
+        HA automatically persists the last known state in its own database –
+        no custom storage needed.
+        """
+        await super().async_added_to_hass()
+        if self.coordinator.data is None:
+            if last_state := await self.async_get_last_state():
+                if last_state.state not in ("unknown", "unavailable"):
+                    try:
+                        self._attr_native_value = float(last_state.state)
+                    except ValueError:
+                        pass
+
     @property
     def native_value(self) -> StateType:
         """Return value of sensor.
@@ -161,7 +179,7 @@ class ApSystemsSensorWithDescription(
         returned and the entity stays available even while the inverter is off.
         """
         if self.coordinator.data is None:
-            return None
+            return self._attr_native_value
         return self.entity_description.value_fn(self.coordinator.data.output_data)
 
 

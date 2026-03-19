@@ -14,9 +14,13 @@ from APsystemsEZ1 import (
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, LOGGER, POLLING_INTERVAL
+
+STORE_VERSION = 1
+STORE_KEY = "apsystems_lifetime_offset"
 
 
 def _fmt_err(err: Exception) -> str:
@@ -86,31 +90,41 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         self.device_version = "unknown"
         self.battery_system = False
         self.current_max_power = None
-
-    async def _async_setup(self) -> None:
-        """Set up coordinator."""
-        try:
-            device_info = await self.api.get_device_info()
-        except (ConnectionError, TimeoutError) as err:
-            LOGGER.error(
-                "Cannot connect to APsystems inverter during setup. "
-                "Check the IP address and make sure Local Mode is enabled. "
-                "Error: %s", _fmt_err(err)
-            )
-            raise UpdateFailed("Could not connect to inverter during setup") from err
-
-        self.api.max_power = getattr(device_info, "maxPower", 800)
-        self.api.min_power = getattr(device_info, "minPower", 30)
-        self.device_version = getattr(device_info, "devVer", "unknown")
-        self.battery_system = getattr(device_info, "isBatterySystem", False)
-
-        LOGGER.info(
-            "APsystems inverter connected – firmware: %s, battery system: %s",
-            self.device_version,
-            self.battery_system,
+        self._store: Store = Store(
+            hass,
+            STORE_VERSION,
+            f"{STORE_KEY}_{config_entry.entry_id}",
         )
 
-        await self._fetch_max_power()
+    async def _async_setup(self) -> None:
+        """Set up coordinator.
+
+        If the inverter is offline at startup (e.g. HA restarted at night),
+        we continue with safe fallback values instead of raising UpdateFailed.
+        This prevents the "Setup error" message in the UI and allows
+        RestoreEntity to serve the last known sensor values immediately.
+        The inverter will be fully initialised on the first successful poll.
+        """
+        await self._load_offsets()
+        try:
+            device_info = await self.api.get_device_info()
+            self.api.max_power = getattr(device_info, "maxPower", 800)
+            self.api.min_power = getattr(device_info, "minPower", 30)
+            self.device_version = getattr(device_info, "devVer", "unknown")
+            self.battery_system = getattr(device_info, "isBatterySystem", False)
+            LOGGER.info(
+                "APsystems inverter connected – firmware: %s, battery system: %s",
+                self.device_version,
+                self.battery_system,
+            )
+            await self._fetch_max_power()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning(
+                "APsystems inverter not reachable during setup – using fallback values. "
+                "Will retry on next poll. Error: %s", _fmt_err(err)
+            )
+            self.api.max_power = 800
+            self.api.min_power = 30
 
     async def _fetch_max_power(self) -> None:
         """Fetch the current power limit from the inverter."""
@@ -126,11 +140,40 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 )
         except Exception as err:  # noqa: BLE001
             LOGGER.warning(
-                "Could not fetch max power limit from inverter: %s: %s. "
+                "Could not fetch max power limit from inverter: %s. "
                 "The power limit entity may not be available.", _fmt_err(err)
             )
 
-    def _compensate_lifetime_energy(self, output_data: ReturnOutputData) -> ReturnOutputData:
+
+    async def _load_offsets(self) -> None:
+        """Load persisted lifetime energy offsets from storage.
+
+        Offsets survive HA restarts so the compensated lifetime total
+        remains correct even after the firmware overflow counter resets.
+        """
+        data = await self._store.async_load()
+        if data:
+            self._te1_offset = float(data.get("te1_offset", 0.0))
+            self._te2_offset = float(data.get("te2_offset", 0.0))
+            self._te1_last_raw = data.get("te1_last_raw")
+            self._te2_last_raw = data.get("te2_last_raw")
+            if self._te1_offset > 0 or self._te2_offset > 0:
+                LOGGER.info(
+                    "Restored lifetime energy offsets from storage – "
+                    "P1: %.5f kWh, P2: %.5f kWh",
+                    self._te1_offset, self._te2_offset,
+                )
+
+    async def _save_offsets(self) -> None:
+        """Persist lifetime energy offsets to storage."""
+        await self._store.async_save({
+            "te1_offset": self._te1_offset,
+            "te2_offset": self._te2_offset,
+            "te1_last_raw": self._te1_last_raw,
+            "te2_last_raw": self._te2_last_raw,
+        })
+
+    def _compensate_lifetime_energy(self, output_data: ReturnOutputData) -> tuple[ReturnOutputData, bool]:
         """Compensate for two known EZ1-M lifetime energy issues:
 
         1. OVERFLOW BUG: At ~540 kWh the firmware resets te1/te2 to 0.
@@ -146,8 +189,10 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         te2_raw = output_data.te2
 
         # 1. Detect and compensate overflow reset (raw drop > 1 kWh)
+        needs_save = False
         if self._te1_last_raw is not None and te1_raw < (self._te1_last_raw - 1.0):
             self._te1_offset += self._te1_last_raw
+            needs_save = True
             LOGGER.warning(
                 "APsystems EZ1 lifetime energy counter reset detected on Input 1! "
                 "Previous: %.5f kWh -> New: %.5f kWh. "
@@ -157,6 +202,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         if self._te2_last_raw is not None and te2_raw < (self._te2_last_raw - 1.0):
             self._te2_offset += self._te2_last_raw
+            needs_save = True
             LOGGER.warning(
                 "APsystems EZ1 lifetime energy counter reset detected on Input 2! "
                 "Previous: %.5f kWh -> New: %.5f kWh. "
@@ -187,7 +233,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         output_data.te1 = te1
         output_data.te2 = te2
 
-        return output_data
+        return output_data, needs_save
 
     async def _async_update_data(self) -> ApSystemsSensorData:
         """Fetch data from inverter."""
@@ -216,12 +262,15 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     )
                 self.inverter_reachable = False
                 return self._last_good_data
-            LOGGER.error(
-                "APsystems inverter returned an error and no cached data is available."
+            # No cache yet (first poll after HA restart while inverter offline).
+            # Return None so RestoreEntity can serve last known values.
+            # HA will retry automatically – no UpdateFailed needed.
+            LOGGER.warning(
+                "APsystems inverter returned an error and no cached data is available. "
+                "Sensors will show last known values via RestoreEntity."
             )
-            raise UpdateFailed(
-                translation_domain=DOMAIN, translation_key="inverter_error"
-            ) from None
+            self.inverter_reachable = False
+            return None  # type: ignore[return-value]
 
         except Exception as err:  # noqa: BLE001
             self._consecutive_errors += 1
@@ -246,12 +295,14 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     )
                 self.inverter_reachable = False
                 return self._last_good_data
-            # No cache available – let HA handle the retry
-            LOGGER.error(
+            # No cache yet – return None so RestoreEntity serves last known values.
+            LOGGER.warning(
                 "APsystems inverter unreachable and no cached data available. "
+                "Sensors will show last known values via RestoreEntity. "
                 "Error: %s", _fmt_err(err)
             )
-            raise UpdateFailed(f"Inverter unreachable: {_fmt_err(err)}") from err
+            self.inverter_reachable = False
+            return None  # type: ignore[return-value]
 
     async def _do_fetch(self) -> ApSystemsSensorData:
         """Perform the actual API calls and return sensor data."""
@@ -259,7 +310,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         alarm_info = await self.api.get_alarm_info()
 
         # If max power was not available during setup (inverter not fully ready),
-        # retry silently on every successful poll until we have a value.
+        # retry once on the next successful poll – but never on every poll.
+        # Polling getMaxPower on every cycle causes sporadic TimeoutError on
+        # firmware 1.12.2 even when the value is already known.
         if self.current_max_power is None:
             await self._fetch_max_power()
 
@@ -272,7 +325,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         self.inverter_reachable = True
 
-        output_data = self._compensate_lifetime_energy(output_data)
+        output_data, needs_save = self._compensate_lifetime_energy(output_data)
+        if needs_save:
+            await self._save_offsets()
 
         result = ApSystemsSensorData(output_data=output_data, alarm_info=alarm_info)
         self._last_good_data = result

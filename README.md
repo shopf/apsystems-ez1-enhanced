@@ -171,16 +171,19 @@ Der EZ1-D (bis 1800W) wird unterstützt. Die Leistungsgrenze wird dynamisch vom 
 
 ## Migration von der offiziellen Integration
 
-Falls bereits Entity-IDs in Dashboards oder Automationen verwendet werden:
+> ⚠️ **Wichtig:** Erstelle zuerst ein Backup und installiere unsere Integration **bevor** du die offizielle löscht – sonst werden alle Statistiken und das Energie-Dashboard gelöscht!
 
-1. Alle verwendeten Entity-IDs notieren
-2. Backup erstellen (**Einstellungen → System → Backups**)
-3. Offizielle Integration entfernen
-4. Diese Integration nach `custom_components/apsystems/` kopieren
-5. Home Assistant neu starten
-6. Integration über die UI einrichten (IP-Adresse, Port, Gerätename)
+**Empfohlene Reihenfolge:**
 
-Da die `unique_id` auf der Seriennummer des Inverters basiert (unverändert), verknüpft Home Assistant die neuen Entitäten automatisch mit den bestehenden Entity-Registry-Einträgen – **individuelle Entity-IDs und der Verlauf bleiben erhalten**.
+1. Backup erstellen (**Einstellungen → System → Backups**)
+2. Diese Integration via HACS installieren (noch nicht einrichten)
+3. Home Assistant neu starten
+4. Offizielle Integration entfernen
+5. Diese Integration über die UI einrichten (IP-Adresse, Port, Gerätename)
+
+Da die `unique_id` auf der Seriennummer des Inverters basiert, verknüpft Home Assistant die neuen Entitäten automatisch mit den bestehenden Entity-Registry-Einträgen – **Entity-IDs, Verlauf und Statistiken bleiben vollständig erhalten**.
+
+> ℹ️ Die Migration von der **Sonnenladen Community Integration** (`apsystemsapi_local`) ist leider nicht nahtlos möglich da diese einen anderen Domain-Namen verwendet. In diesem Fall gehen Statistiken verloren – ein automatischer Migrationspfad ist für eine zukünftige Version geplant.
 
 ---
 
@@ -223,6 +226,9 @@ APsystems veröffentlicht keine öffentliche Firmware-Datenbank. Updates sind au
 | EZ1-M | 1.6.x | ✅ Sollte funktionieren |
 | EZ1-M | 1.7.0 | ✅ Getestet |
 | EZ1-M | 1.7.5 | ✅ Getestet |
+| EZ1-M | 1.9.0 | ⚠️ Lifetime-Werte fehlerhaft (Firmware-Bug) – Workaround aktiv |
+| EZ1-M | 1.10.2 | ✅ Getestet – Firmware-Bug behoben |
+| EZ1-M | 1.12.2 | ✅ Getestet – Sicherheitslücke geschlossen, empfohlen |
 | EZ1-M | 1.1.2_b | ✅ Behoben (war kaputt in offizieller) |
 | EZ1-M | 2.0.1_B | ✅ Behoben (war kaputt in offizieller) |
 | EZ1-D | – | ✅ Unterstützt (maxPower dynamisch) |
