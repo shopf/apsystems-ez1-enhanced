@@ -24,7 +24,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ApSystemsConfigEntry) ->
         ip_address=entry.data[CONF_IP_ADDRESS],
         port=entry.data.get(CONF_PORT, DEFAULT_PORT),
         timeout=8,
-        enable_debounce=True,
     )
     coordinator = ApSystemsDataCoordinator(hass, entry, api)
 

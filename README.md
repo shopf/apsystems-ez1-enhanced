@@ -171,17 +171,16 @@ Der EZ1-D (bis 1800W) wird unterstützt. Die Leistungsgrenze wird dynamisch vom 
 
 ## Migration von der offiziellen Integration
 
-> ⚠️ **Wichtig:** Erstelle zuerst ein Backup und installiere unsere Integration **bevor** du die offizielle löscht – sonst werden alle Statistiken und das Energie-Dashboard gelöscht!
+Diese Integration ersetzt die offizielle HA APsystems Integration automatisch – ein manuelles Löschen der offiziellen Integration ist **nicht notwendig**.
 
-**Empfohlene Reihenfolge:**
+**So einfach geht es:**
 
 1. Backup erstellen (**Einstellungen → System → Backups**)
-2. Diese Integration via HACS installieren (noch nicht einrichten)
+2. Diese Integration via HACS als Custom Repository hinzufügen und installieren
 3. Home Assistant neu starten
-4. Offizielle Integration entfernen
-5. Diese Integration über die UI einrichten (IP-Adresse, Port, Gerätename)
+4. Integration über die UI einrichten (IP-Adresse, Port, Gerätename)
 
-Da die `unique_id` auf der Seriennummer des Inverters basiert, verknüpft Home Assistant die neuen Entitäten automatisch mit den bestehenden Entity-Registry-Einträgen – **Entity-IDs, Verlauf und Statistiken bleiben vollständig erhalten**.
+HA erkennt automatisch dass beide Integrationen denselben Domain-Namen `apsystems` verwenden und zeigt unsere als Ersatz an. **Entity-IDs, Verlauf und Statistiken bleiben vollständig erhalten** da die `unique_id` auf der Seriennummer des Inverters basiert.
 
 > ℹ️ Die Migration von der **Sonnenladen Community Integration** (`apsystemsapi_local`) ist leider nicht nahtlos möglich da diese einen anderen Domain-Namen verwendet. In diesem Fall gehen Statistiken verloren – ein automatischer Migrationspfad ist für eine zukünftige Version geplant.
 

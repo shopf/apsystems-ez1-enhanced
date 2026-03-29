@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from APsystemsEZ1 import APsystemsEZ1M
 
 from homeassistant.components.number import NumberEntity, NumberMode
@@ -77,6 +79,8 @@ class ApSystemsMaxPowerNumber(
     async def async_set_native_value(self, value: float) -> None:
         """Set a new power limit.
 
+        Waits for any active poll to finish before sending the command,
+        preventing concurrent API calls on the same inverter connection.
         Validates against the inverter's reported hardware limits before
         sending, and catches ValueError from the library as a safety net.
         """
@@ -89,14 +93,25 @@ class ApSystemsMaxPowerNumber(
                 f"({min_p}W – {max_p}W) for this inverter."
             )
 
+        # Wait for active poll to complete before sending command
+        waited = 0
+        while self.coordinator._poll_active:
+            await asyncio.sleep(0.5)
+            waited += 1
+            if waited > 20:  # 10 seconds max
+                LOGGER.warning("Timed out waiting for poll to finish – aborting set power limit.")
+                return
+
         try:
+            self.coordinator._poll_active = True
             await self._api.set_max_power(int(value))
         except ValueError as err:
-            # The library performs its own range check – surface it clearly.
             LOGGER.error("Failed to set power limit to %sW: %s", value, err)
             raise HomeAssistantError(
                 f"Inverter rejected power limit of {value}W: {err}"
             ) from err
+        finally:
+            self.coordinator._poll_active = False
 
         self.coordinator.current_max_power = value
         self.async_write_ha_state()

@@ -18,7 +18,6 @@ from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import DiscoveryInfoType, StateType
-from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import ApSystemsConfigEntry, ApSystemsData, ApSystemsDataCoordinator
@@ -134,7 +133,7 @@ async def async_setup_entry(
 
 
 class ApSystemsSensorWithDescription(
-    CoordinatorEntity[ApSystemsDataCoordinator], ApSystemsEntity, SensorEntity, RestoreEntity
+    CoordinatorEntity[ApSystemsDataCoordinator], ApSystemsEntity, SensorEntity
 ):
     """Base sensor to be used with description."""
 
@@ -152,34 +151,24 @@ class ApSystemsSensorWithDescription(
         self.entity_description = entity_description
         self._attr_unique_id = f"{data.device_id}_{entity_description.key}"
 
-    async def async_added_to_hass(self) -> None:
-        """Restore last known state on HA startup if coordinator has no data yet.
+    def _handle_coordinator_update(self) -> None:
+        """Update device info when coordinator data changes.
 
-        This prevents sensors from showing as unavailable immediately after a
-        HA restart when the inverter is still offline (e.g. at night).
-        HA automatically persists the last known state in its own database –
-        no custom storage needed.
+        This ensures sw_version and IP in device info are refreshed as soon
+        as the inverter comes online after a cold start.
         """
-        await super().async_added_to_hass()
-        if self.coordinator.data is None:
-            if last_state := await self.async_get_last_state():
-                if last_state.state not in ("unknown", "unavailable"):
-                    try:
-                        self._attr_native_value = float(last_state.state)
-                    except ValueError:
-                        pass
+        self._update_device_info()
+        super()._handle_coordinator_update()
 
     @property
     def native_value(self) -> StateType:
         """Return value of sensor.
 
-        Returns None (shown as unavailable) if no data has been received yet,
-        e.g. when the inverter was offline during the initial HA startup.
-        Once the coordinator has data (either fresh or cached), the value is
-        returned and the entity stays available even while the inverter is off.
+        The coordinator always provides valid data via _fallback_data –
+        sensors are never unavailable, even after a HA restart at night.
         """
         if self.coordinator.data is None:
-            return self._attr_native_value
+            return None
         return self.entity_description.value_fn(self.coordinator.data.output_data)
 
 
