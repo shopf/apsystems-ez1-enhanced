@@ -18,7 +18,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN, LOGGER, POLLING_INTERVAL
+from .const import CONF_POLLING_INTERVAL, DOMAIN, LOGGER, POLLING_INTERVAL
 
 STORE_VERSION = 1
 STORE_KEY = "apsystems_lifetime_offset"
@@ -26,7 +26,10 @@ STORE_KEY = "apsystems_lifetime_offset"
 # Minimum today-energy value above which a sudden drop to 0.0 is treated as a
 # firmware bug (EZ1 firmware 1.12.2 resets e1/e2 to 0 ~11 min before shutdown).
 # Below this threshold the reset is treated as a legitimate midnight reset.
-_TODAY_RESET_THRESHOLD = 0.01  # kWh – below this, a drop to 0 is a legitimate midnight reset
+_TODAY_RESET_THRESHOLD = 0.01  # kWh – values below this are treated as "near zero"
+# Minimum production seen today before a near-zero reading is treated as a firmware bug.
+# Below this, the inverter may legitimately be starting up on a cloudy morning.
+_SIGNIFICANT_PRODUCTION = 0.05  # kWh – 50 Wh
 
 # Alarm info is read every Nth poll to reduce load on the inverter and
 # avoid WLAN reconnects on firmware 1.12.2 which reconnects frequently.
@@ -120,7 +123,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             LOGGER,
             config_entry=config_entry,
             name="APSystems Data",
-            update_interval=timedelta(seconds=POLLING_INTERVAL),
+            update_interval=timedelta(seconds=config_entry.data.get(CONF_POLLING_INTERVAL, POLLING_INTERVAL)),
         )
         self.api = api
         self.device_version = "unknown"
@@ -179,7 +182,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 "APsystems inverter not reachable during setup – using fallback values. "
                 "Will retry on next poll. Error: %s", _fmt_err(err)
             )
-            self.api.max_power = 800
+            # Use stored values as fallback so number/switch entities
+            # show correct limits immediately even when inverter is offline
+            self.api.max_power = int(self.current_max_power or 800)
             self.api.min_power = 30
 
     async def _fetch_max_power(self) -> None:
@@ -208,24 +213,75 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         """
         data = await self._store.async_load()
         if data:
+            # Lifetime energy overflow compensation
             self._te1_offset = float(data.get("te1_offset", 0.0))
             self._te2_offset = float(data.get("te2_offset", 0.0))
             self._te1_last_raw = data.get("te1_last_raw")
             self._te2_last_raw = data.get("te2_last_raw")
-            if self._te1_offset > 0 or self._te2_offset > 0:
-                LOGGER.info(
-                    "Restored lifetime energy offsets from storage – "
-                    "P1: %.5f kWh, P2: %.5f kWh",
-                    self._te1_offset, self._te2_offset,
-                )
+            self._te1_last_out = data.get("te1_last_out")
+            self._te2_last_out = data.get("te2_last_out")
 
-    async def _save_offsets(self) -> None:
-        """Persist lifetime energy offsets to storage."""
+            # Today energy protection
+            self._e1_protected = float(data.get("e1_protected", 0.0))
+            self._e2_protected = float(data.get("e2_protected", 0.0))
+            pd = data.get("protected_date")
+            self._protected_date = date.fromisoformat(pd) if pd else None
+
+            # Power limit
+            mp = data.get("current_max_power")
+            if mp is not None:
+                self.current_max_power = float(mp)
+
+            # Device info
+            self.device_version = data.get("device_version", "unknown")
+            self.device_ip = data.get("device_ip", "unknown")
+
+            # Restore fallback data so sensors show last known values immediately
+            fb = self._fallback_data.output_data
+            fb.p1 = 0.0  # power always 0 at startup – inverter may be off
+            fb.p2 = 0.0
+            fb.e1 = float(data.get("fb_e1", 0.0))
+            fb.e2 = float(data.get("fb_e2", 0.0))
+            fb.te1 = float(data.get("fb_te1", 0.0))
+            fb.te2 = float(data.get("fb_te2", 0.0))
+
+            LOGGER.info(
+                "Restored state from storage – "
+                "te1_out=%.5f kWh, te2_out=%.5f kWh, "
+                "e1_protected=%.5f kWh, e2_protected=%.5f kWh, "
+                "max_power=%s W, firmware=%s",
+                self._te1_last_out or 0.0, self._te2_last_out or 0.0,
+                self._e1_protected, self._e2_protected,
+                self.current_max_power, self.device_version,
+            )
+
+    async def _save_state(self) -> None:
+        """Persist all coordinator state to storage so it survives HA restarts."""
+        fb = self._fallback_data.output_data
         await self._store.async_save({
+            # Lifetime energy overflow compensation
             "te1_offset": self._te1_offset,
             "te2_offset": self._te2_offset,
             "te1_last_raw": self._te1_last_raw,
             "te2_last_raw": self._te2_last_raw,
+            "te1_last_out": self._te1_last_out,
+            "te2_last_out": self._te2_last_out,
+            # Today energy protection
+            "e1_protected": self._e1_protected,
+            "e2_protected": self._e2_protected,
+            "protected_date": self._protected_date.isoformat() if self._protected_date else None,
+            # Power limit
+            "current_max_power": self.current_max_power,
+            # Last known sensor values (fallback data)
+            "fb_p1": fb.p1,
+            "fb_p2": fb.p2,
+            "fb_e1": fb.e1,
+            "fb_e2": fb.e2,
+            "fb_te1": fb.te1,
+            "fb_te2": fb.te2,
+            # Device info
+            "device_version": self.device_version,
+            "device_ip": self.device_ip,
         })
 
     def _compensate_lifetime_energy(self, output_data: ReturnOutputData) -> tuple[ReturnOutputData, bool]:
@@ -298,16 +354,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         e2_raw = output_data.e2
         today = date.today()
 
-        # Midnight reset: new calendar day → clear protected values so day starts at 0
-        if self._protected_date is not None and today != self._protected_date:
-            LOGGER.info(
-                "Today energy counters reset at midnight – P1: %.5f kWh, P2: %.5f kWh.",
-                self._e1_protected, self._e2_protected,
-            )
-            self._e1_protected = 0.0
-            self._e2_protected = 0.0
-            self._e1_reset_logged = False
-            self._e2_reset_logged = False
+        # Midnight reset is handled in _async_update_data – see _check_midnight_reset()
 
         # Track highest value seen today – never allow decrease within same day
         if e1_raw > self._e1_protected:
@@ -319,8 +366,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._protected_date = today
             self._e2_reset_logged = False
 
-        # Detect firmware bug: e1/e2 dropped to 0 but protected value is significant
-        if e1_raw == 0.0 and self._e1_protected > _TODAY_RESET_THRESHOLD:
+        # Detect firmware bug: e1/e2 near zero but significant production already seen today.
+        # Uses _SIGNIFICANT_PRODUCTION to avoid false positives on cloudy mornings.
+        if e1_raw < _TODAY_RESET_THRESHOLD and self._e1_protected > _SIGNIFICANT_PRODUCTION:
             if not self._e1_reset_logged:
                 LOGGER.warning(
                     "APsystems EZ1 today energy (e1) reset to 0 while last known value "
@@ -332,7 +380,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 LOGGER.debug("e1 still 0 – holding protected value %.5f kWh.", self._e1_protected)
             output_data.e1 = self._e1_protected
 
-        if e2_raw == 0.0 and self._e2_protected > _TODAY_RESET_THRESHOLD:
+        if e2_raw < _TODAY_RESET_THRESHOLD and self._e2_protected > _SIGNIFICANT_PRODUCTION:
             if not self._e2_reset_logged:
                 LOGGER.warning(
                     "APsystems EZ1 today energy (e2) reset to 0 while last known value "
@@ -346,6 +394,29 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         return output_data, needs_save
 
+    def _check_midnight_reset(self) -> None:
+        """Reset today energy protection at midnight, regardless of inverter state.
+
+        This runs on every poll – even when the inverter is offline – so the
+        reset happens at midnight and not when the inverter comes back online
+        the next morning (which would show yesterday's value until first poll).
+        """
+        today = date.today()
+        if self._protected_date is not None and today != self._protected_date:
+            LOGGER.info(
+                "Today energy counters reset at midnight – P1: %.5f kWh, P2: %.5f kWh.",
+                self._e1_protected, self._e2_protected,
+            )
+            self._e1_protected = 0.0
+            self._e2_protected = 0.0
+            self._e1_reset_logged = False
+            self._e2_reset_logged = False
+            self._protected_date = today
+            # Also reset fallback data today energy values
+            self._fallback_data.output_data.e1 = 0.0
+            self._fallback_data.output_data.e2 = 0.0
+            LOGGER.debug("Fallback data today energy reset to 0 at midnight.")
+
     async def _async_update_data(self) -> ApSystemsSensorData:
         """Fetch data from inverter, always returning valid data.
 
@@ -353,10 +424,14 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         sensors never become unavailable. Power values are zeroed after
         several consecutive errors to reflect that the inverter is off.
         """
+        # Midnight reset runs every poll regardless of inverter state
+        self._check_midnight_reset()
+
         # Skip if another API call is already in progress
         if self._poll_active:
             LOGGER.debug("Poll already active – returning cached data.")
             return self._fallback_data
+
 
         try:
             self._poll_active = True
@@ -385,6 +460,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._fallback_data.output_data.p1 = 0
             self._fallback_data.output_data.p2 = 0
             self._stable_polls_after_error = 0  # reset – must re-stabilize before restore
+            self._power_limit_restored = False  # allow restore on next reconnect
             self.inverter_reachable = False
             return self._fallback_data
 
@@ -400,7 +476,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     "APsystems inverter still unreachable after %d polls (%ds). "
                     "Check network connection. Error: %s",
                     self._consecutive_errors,
-                    self._consecutive_errors * POLLING_INTERVAL,
+                    self._consecutive_errors * self.update_interval.total_seconds(),
                     _fmt_err(err),
                 )
             else:
@@ -412,6 +488,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._fallback_data.output_data.p1 = 0
             self._fallback_data.output_data.p2 = 0
             self._stable_polls_after_error = 0  # reset – must re-stabilize before restore
+            self._power_limit_restored = False  # allow restore on next reconnect
             self.inverter_reachable = False
             return self._fallback_data
 
@@ -475,35 +552,47 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         self.inverter_reachable = True
 
-        # Restore power limit after inverter restart – but only after 3 stable
-        # polls to ensure the inverter is fully ready. The inverter resets its
-        # internal limit to the hardware default on some firmware versions.
+        # Restore power limit after inverter restart.
+        # Wait for 3 stable polls (≈36s) before attempting restore to ensure
+        # inverter is fully ready. Retry up to 5 times if it fails (Timeout).
         self._stable_polls_after_error += 1
-        if self._stable_polls_after_error == 3 and self.current_max_power is not None:
-            try:
-                inverter_limit = await self.api.get_max_power()
-                if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
-                    await self.api.set_max_power(int(self.current_max_power))
-                    LOGGER.info(
-                        "Restored power limit to %sW after inverter restart "
-                        "(inverter reported %sW).",
-                        self.current_max_power,
-                        inverter_limit,
-                    )
-                else:
+        if self._stable_polls_after_error >= 3 and self.current_max_power is not None:
+            if not getattr(self, "_power_limit_restored", False):
+                try:
+                    inverter_limit = await self.api.get_max_power()
                     LOGGER.debug(
-                        "Power limit check after restart: inverter at %sW, stored %sW – no change needed.",
-                        inverter_limit,
-                        self.current_max_power,
+                        "Power limit check: inverter=%sW, stored=%sW",
+                        inverter_limit, self.current_max_power
                     )
-            except Exception as err:  # noqa: BLE001
-                LOGGER.warning(
-                    "Could not restore power limit after inverter restart: %s", _fmt_err(err)
-                )
+                    if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
+                        await self.api.set_max_power(int(self.current_max_power))
+                        LOGGER.info(
+                            "Restored power limit to %sW after inverter restart "
+                            "(inverter reported %sW).",
+                            self.current_max_power,
+                            inverter_limit,
+                        )
+                        self._power_limit_restored = True
+                    else:
+                        LOGGER.debug(
+                            "Power limit OK after restart: inverter=%sW, stored=%sW.",
+                            inverter_limit, self.current_max_power,
+                        )
+                        self._power_limit_restored = True
+                except Exception as err:  # noqa: BLE001
+                    LOGGER.warning(
+                        "Could not restore power limit (attempt %d): %s",
+                        self._stable_polls_after_error - 2, _fmt_err(err)
+                    )
+                    # Will retry on next poll automatically
 
         output_data, needs_save = self._compensate_lifetime_energy(output_data)
         if needs_save:
-            await self._save_offsets()
+            await self._save_state()
+        elif self._poll_count % 10 == 0:
+            # Periodically save last_out so it survives HA restarts
+            # and prevents lifetime energy jumps after cold start
+            await self._save_state()
 
         result = ApSystemsSensorData(output_data=output_data, alarm_info=alarm_info)
         self._fallback_data = result

@@ -7,12 +7,14 @@
         "data": {
           "ip_address": "IP-Adresse",
           "port": "Port",
-          "device_name": "Gerätename"
+          "device_name": "Gerätename",
+          "polling_interval": "Abfrageintervall (Sekunden)"
         },
         "data_description": {
           "ip_address": "Lokale IP-Adresse des Wechselrichters (statische IP empfohlen).",
           "port": "API-Port des Wechselrichters (Standard: 8050).",
-          "device_name": "Frei wählbarer Name, z. B. 'Balkonkraftwerk' oder 'Garage Solar'."
+          "device_name": "Frei wählbarer Name, z. B. 'Balkonkraftwerk' oder 'Garage Solar'.",
+          "polling_interval": "Wie oft der Wechselrichter abgefragt wird (12–60 Sekunden). Kleinere Werte erhöhen die Last auf dem Wechselrichter und können zu WLAN-Verbindungsabbrüchen führen. Standard: 12 Sekunden."
         }
       }
     },

@@ -10,7 +10,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_IP_ADDRESS, CONF_PORT
 
-from .const import CONF_DEVICE_NAME, DEFAULT_DEVICE_NAME, DEFAULT_PORT, DOMAIN
+from .const import CONF_DEVICE_NAME, CONF_POLLING_INTERVAL, DEFAULT_DEVICE_NAME, DEFAULT_PORT, DOMAIN, MAX_POLLING_INTERVAL, MIN_POLLING_INTERVAL, POLLING_INTERVAL
 
 
 class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
@@ -38,12 +38,14 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                 uid = device_info.deviceId
                 await self.async_set_unique_id(uid)
                 self._abort_if_unique_id_configured()
+                polling_interval = user_input.get(CONF_POLLING_INTERVAL, POLLING_INTERVAL)
                 return self.async_create_entry(
                     title=device_name,
                     data={
                         CONF_IP_ADDRESS: ip,
                         CONF_PORT: port,
                         CONF_DEVICE_NAME: device_name,
+                        CONF_POLLING_INTERVAL: polling_interval,
                     },
                 )
 
@@ -54,7 +56,15 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                     vol.Required(CONF_IP_ADDRESS): str,
                     vol.Optional(CONF_PORT, default=DEFAULT_PORT): int,
                     vol.Optional(CONF_DEVICE_NAME, default=DEFAULT_DEVICE_NAME): str,
+                    vol.Optional(CONF_POLLING_INTERVAL, default=POLLING_INTERVAL): vol.All(
+                        int,
+                        vol.Range(min=MIN_POLLING_INTERVAL, max=MAX_POLLING_INTERVAL),
+                    ),
                 }
             ),
             errors=errors,
+            description_placeholders={
+                "min_interval": str(MIN_POLLING_INTERVAL),
+                "max_interval": str(MAX_POLLING_INTERVAL),
+            },
         )

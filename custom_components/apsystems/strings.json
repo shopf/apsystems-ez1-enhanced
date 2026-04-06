@@ -7,12 +7,14 @@
         "data": {
           "ip_address": "IP-Adresse",
           "port": "Port",
-          "device_name": "Gerätename"
+          "device_name": "Gerätename",
+          "polling_interval": "Poll interval (seconds)"
         },
         "data_description": {
           "ip_address": "Lokale IP-Adresse des Wechselrichters (statische IP empfohlen).",
           "port": "API-Port des Wechselrichters (Standard: 8050).",
-          "device_name": "Frei wählbarer Name, z. B. 'Balkonkraftwerk' oder 'Garage Solar'."
+          "device_name": "Frei wählbarer Name, z. B. 'Balkonkraftwerk' oder 'Garage Solar'.",
+          "polling_interval": "How often the inverter is queried (12–60 seconds). Lower values increase load on the inverter and may cause WLAN reconnects. Default: 12 seconds."
         }
       }
     },
@@ -22,21 +24,47 @@
   },
   "entity": {
     "sensor": {
-      "total_power": { "name": "Total output power" },
-      "total_power_p1": { "name": "Power from P1" },
-      "total_power_p2": { "name": "Power from P2" },
-      "today_production": { "name": "Today's production" },
-      "today_production_p1": { "name": "Production from P1 today" },
-      "today_production_p2": { "name": "Production from P2 today" },
-      "lifetime_production": { "name": "Total production over lifetime" },
-      "lifetime_production_p1": { "name": "Production from P1 over lifetime" },
-      "lifetime_production_p2": { "name": "Production from P2 over lifetime" },
-      "firmware_version": { "name": "Firmware version" }
+      "total_power": {
+        "name": "Total output power"
+      },
+      "total_power_p1": {
+        "name": "Power from P1"
+      },
+      "total_power_p2": {
+        "name": "Power from P2"
+      },
+      "today_production": {
+        "name": "Today's production"
+      },
+      "today_production_p1": {
+        "name": "Production from P1 today"
+      },
+      "today_production_p2": {
+        "name": "Production from P2 today"
+      },
+      "lifetime_production": {
+        "name": "Total production over lifetime"
+      },
+      "lifetime_production_p1": {
+        "name": "Production from P1 over lifetime"
+      },
+      "lifetime_production_p2": {
+        "name": "Production from P2 over lifetime"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      }
     },
     "binary_sensor": {
-      "off_grid_status": { "name": "Grid fault" },
-      "dc_1_short_circuit_error_status": { "name": "DC 1 short circuit" },
-      "dc_2_short_circuit_error_status": { "name": "DC 2 short circuit" },
+      "off_grid_status": {
+        "name": "Grid fault"
+      },
+      "dc_1_short_circuit_error_status": {
+        "name": "DC 1 short circuit"
+      },
+      "dc_2_short_circuit_error_status": {
+        "name": "DC 2 short circuit"
+      },
       "inverter_active": {
         "name": "Inverter active",
         "state": {
@@ -52,7 +80,9 @@
       }
     },
     "switch": {
-      "inverter_status": { "name": "Inverter" }
+      "inverter_status": {
+        "name": "Inverter"
+      }
     }
   },
   "exceptions": {

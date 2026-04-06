@@ -7,12 +7,14 @@
         "data": {
           "ip_address": "IP address",
           "port": "Port",
-          "device_name": "Device name"
+          "device_name": "Device name",
+          "polling_interval": "Poll interval (seconds)"
         },
         "data_description": {
           "ip_address": "Local IP address of the inverter (static IP recommended).",
           "port": "API port of the inverter (default: 8050).",
-          "device_name": "Custom name, e.g. 'Balcony Solar' or 'Garage Solar'."
+          "device_name": "Custom name, e.g. 'Balcony Solar' or 'Garage Solar'.",
+          "polling_interval": "How often the inverter is queried (12–60 seconds). Lower values increase load on the inverter and may cause WLAN reconnects. Default: 12 seconds."
         }
       }
     },
