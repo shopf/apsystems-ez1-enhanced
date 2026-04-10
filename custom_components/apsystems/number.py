@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import LOGGER
-from .coordinator import ApSystemsConfigEntry, ApSystemsData, ApSystemsDataCoordinator
+from .coordinator import ApSystemsConfigEntry, ApSystemsData, ApSystemsDataCoordinator, _fmt_err
 from .entity import ApSystemsEntity
 
 # Hardware limits as defined by APsystems for the EZ1-M.
@@ -105,6 +105,28 @@ class ApSystemsMaxPowerNumber(
         try:
             self.coordinator._poll_active = True
             await self._api.set_max_power(int(value))
+
+            # Fix: if getDefaultMaxPower is available and the new value exceeds
+            # the flash limit, the inverter silently caps output at the flash value.
+            # Keep both in sync by calling setDefaultMaxPower as well.
+            default_mp = self.coordinator.default_max_power
+            if default_mp is not None and int(value) > default_mp:
+                ok, reason = await self.coordinator._try_set_default_max_power(int(value))
+                if ok:
+                    LOGGER.info(
+                        "Power limit set to %sW – flash limit also updated "
+                        "(was %sW, now %sW).",
+                        int(value), default_mp, int(value),
+                    )
+                else:
+                    LOGGER.info(
+                        "Power limit set to %sW in RAM. Flash-Grenze konnte nicht "
+                        "aktualisiert werden (aktuell %sW): %s",
+                        int(value), default_mp, reason,
+                    )
+            else:
+                LOGGER.info("Power limit set to %sW.", int(value))
+
         except ValueError as err:
             LOGGER.error("Failed to set power limit to %sW: %s", value, err)
             raise HomeAssistantError(

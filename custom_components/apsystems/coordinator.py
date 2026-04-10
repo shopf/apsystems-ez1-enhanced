@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from APsystemsEZ1 import (
     APsystemsEZ1M,
@@ -64,11 +64,47 @@ def _make_fallback_alarm() -> ReturnAlarmInfo:
 
 
 @dataclass
+class ReturnOutputDataDetail:
+    """Extended output data from /getOutputDataDetail endpoint.
+
+    Available on firmware 1.7.0+ – adds voltage, current, grid and temperature.
+    Falls back gracefully to None values on older firmware.
+    """
+    # PV input voltages (V)
+    v1: float | None = None
+    v2: float | None = None
+    # PV input currents (A)
+    c1: float | None = None
+    c2: float | None = None
+    # Grid voltage (V) and frequency (Hz)
+    gv: float | None = None
+    gf: float | None = None
+    # Inverter temperature (°C) – last known value is preserved when offline
+    t: float | None = None
+
+
+def _make_fallback_detail() -> ReturnOutputDataDetail:
+    """Return a safe all-zero detail data object for offline state.
+
+    Voltages, currents and grid values are 0 when inverter is offline.
+    Temperature is intentionally None here and will be filled with the last
+    known value once it has been seen at least once (see _load_offsets).
+    """
+    return ReturnOutputDataDetail(
+        v1=0.0, v2=0.0,
+        c1=0.0, c2=0.0,
+        gv=0.0, gf=0.0,
+        t=None,  # filled with last known value after first successful poll
+    )
+
+
+@dataclass
 class ApSystemsSensorData:
     """Representing different APsystems sensor data."""
 
     output_data: ReturnOutputData
     alarm_info: ReturnAlarmInfo
+    detail_data: ReturnOutputDataDetail | None = None
 
 
 @dataclass
@@ -107,9 +143,16 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
     _protected_date: date | None = None  # date when _e1/e2_protected were last updated
     _stable_polls_after_error: int = 0  # counts successful polls after reconnect
     _device_info_retries: int = 0  # counts remaining retries for device info
+    default_max_power: int | None = None  # from /getDefaultMaxPower (flash value)
 
     # Device IP address shown in device info
     device_ip: str = "unknown"
+
+    # Timestamp of the last successful setDefaultMaxPower increase.
+    # The EZ1 firmware enforces a 15-minute cooldown before the flash limit
+    # can be raised again. Tracked so we can report the remaining wait time.
+    _last_flash_increase_time: datetime | None = None
+    _FLASH_COOLDOWN_SECONDS: int = 15 * 60  # 900 s
 
     def __init__(
         self,
@@ -137,7 +180,15 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         self._fallback_data = ApSystemsSensorData(
             output_data=_make_fallback_output(),
             alarm_info=_make_fallback_alarm(),
+            detail_data=_make_fallback_detail(),
         )
+        # _fallback_detail holds offline values for detail sensors.
+        # Voltages/currents/grid → 0 when offline; temperature → last known value.
+        self._fallback_detail: ReturnOutputDataDetail = _make_fallback_detail()
+        # Last known inverter temperature (°C) – preserved across offline periods
+        self._last_temperature: float | None = None
+        # True once /getOutputDataDetail has succeeded at least once
+        self._detail_supported: bool | None = None  # None = not yet tested
 
         # _poll_active prevents concurrent API calls from coordinator, number and
         # switch entities running simultaneously on the same inverter connection.
@@ -187,13 +238,80 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self.api.max_power = int(self.current_max_power or 800)
             self.api.min_power = 30
 
+    async def _try_set_default_max_power(self, new_value: int) -> tuple[bool, str | None]:
+        """Attempt to raise the flash power limit via setDefaultMaxPower.
+
+        The EZ1 firmware enforces a 15-minute cooldown before the flash limit
+        can be raised again. This method:
+        - Returns (True, None) on success and updates default_max_power.
+        - Returns (False, reason_str) on failure, where reason_str is a
+          human-readable message including the remaining cooldown time when
+          the 15-minute lock is the likely cause.
+
+        Lowering the flash limit is always allowed (no cooldown).
+        """
+        is_increase = (
+            self.default_max_power is not None and new_value > self.default_max_power
+        )
+
+        try:
+            await self.api._request(f"setDefaultMaxPower?p={new_value}")
+            # Success – update cached flash value and record timestamp for increases
+            self.default_max_power = new_value
+            if is_increase:
+                self._last_flash_increase_time = datetime.now()
+            return True, None
+        except Exception as err:  # noqa: BLE001
+            reason = _fmt_err(err)
+            if is_increase:
+                # Estimate remaining cooldown from last successful increase
+                if self._last_flash_increase_time is not None:
+                    elapsed = (datetime.now() - self._last_flash_increase_time).total_seconds()
+                    remaining = max(0, self._FLASH_COOLDOWN_SECONDS - int(elapsed))
+                    if remaining > 0:
+                        mins = remaining // 60
+                        secs = remaining % 60
+                        wait_hint = (
+                            f"Bitte in {mins} Min. {secs} Sek. erneut versuchen."
+                            if mins > 0
+                            else f"Bitte in {secs} Sek. erneut versuchen."
+                        )
+                        return False, f"{reason} – {wait_hint}"
+                # No prior timestamp: cooldown may apply, but duration unknown
+                return False, (
+                    f"{reason} – Die Firmware erlaubt eine Erhöhung erst nach "
+                    f"15 Minuten. Bitte später erneut versuchen."
+                )
+            return False, reason
+
     async def _fetch_max_power(self) -> None:
-        """Fetch the current power limit from the inverter."""
+        """Fetch the current and default power limits from the inverter.
+
+        On firmware >= 1.9.x: getDefaultMaxPower returns the flash value,
+        getMaxPower returns the RAM value (reset to flash on each restart).
+        On older firmware: getMaxPower writes directly to flash.
+        We always use the default (flash) value as our reference.
+        """
+        # Try getDefaultMaxPower first (firmware 1.9.x+)
+        try:
+            resp = await self.api._request("getDefaultMaxPower")
+            if resp and resp.get("data", {}).get("power"):
+                self.default_max_power = int(resp["data"]["power"])
+                self.current_max_power = float(self.default_max_power)
+                LOGGER.info(
+                    "Power limit fetched from flash (getDefaultMaxPower): %sW",
+                    self.default_max_power,
+                )
+                return
+        except Exception:  # noqa: BLE001
+            pass  # endpoint not available on this firmware – fall through
+
+        # Fallback: getMaxPower (all firmware)
         try:
             result = await self.api.get_max_power()
             if result is not None:
                 self.current_max_power = float(result)
-                LOGGER.debug("Max power limit fetched: %sW", self.current_max_power)
+                LOGGER.debug("Max power limit fetched (getMaxPower): %sW", self.current_max_power)
             else:
                 LOGGER.warning(
                     "APsystems inverter returned no value for max power limit. "
@@ -245,6 +363,20 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             fb.te1 = float(data.get("fb_te1", 0.0))
             fb.te2 = float(data.get("fb_te2", 0.0))
 
+            # Restore detail fallback values (0 for electrical, last known for temperature)
+            self._last_temperature = data.get("fb_temperature")
+            self._fallback_detail = ReturnOutputDataDetail(
+                v1=0.0, v2=0.0,
+                c1=0.0, c2=0.0,
+                gv=0.0, gf=0.0,
+                t=self._last_temperature,
+            )
+            self._fallback_data = ApSystemsSensorData(
+                output_data=self._fallback_data.output_data,
+                alarm_info=self._fallback_data.alarm_info,
+                detail_data=self._fallback_detail,
+            )
+
             LOGGER.info(
                 "Restored state from storage – "
                 "te1_out=%.5f kWh, te2_out=%.5f kWh, "
@@ -279,6 +411,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             "fb_e2": fb.e2,
             "fb_te1": fb.te1,
             "fb_te2": fb.te2,
+            # Last known temperature (preserved across offline periods)
+            "fb_temperature": self._last_temperature,
             # Device info
             "device_version": self.device_version,
             "device_ip": self.device_ip,
@@ -370,7 +504,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # Uses _SIGNIFICANT_PRODUCTION to avoid false positives on cloudy mornings.
         if e1_raw < _TODAY_RESET_THRESHOLD and self._e1_protected > _SIGNIFICANT_PRODUCTION:
             if not self._e1_reset_logged:
-                LOGGER.warning(
+                LOGGER.info(
                     "APsystems EZ1 today energy (e1) reset to 0 while last known value "
                     "was %.5f kWh – firmware bug detected. Holding last value until midnight.",
                     self._e1_protected,
@@ -382,7 +516,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         if e2_raw < _TODAY_RESET_THRESHOLD and self._e2_protected > _SIGNIFICANT_PRODUCTION:
             if not self._e2_reset_logged:
-                LOGGER.warning(
+                LOGGER.info(
                     "APsystems EZ1 today energy (e2) reset to 0 while last known value "
                     "was %.5f kWh – firmware bug detected. Holding last value until midnight.",
                     self._e2_protected,
@@ -440,18 +574,19 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         except InverterReturnedError:
             self._consecutive_errors += 1
             if self._consecutive_errors == 1:
-                LOGGER.warning(
+                LOGGER.info(
                     "APsystems inverter returned an error – "
                     "serving cached data (likely entering night/standby mode)."
                 )
             elif self._consecutive_errors == 10:
-                LOGGER.warning(
+                LOGGER.info(
                     "APsystems inverter still returning errors after %d polls (%ds). "
                     "If this is not nightly standby, check the inverter.",
                     self._consecutive_errors,
                     self._consecutive_errors * POLLING_INTERVAL,
                 )
-            else:
+            elif self._consecutive_errors % 50 == 0:
+                # ~10 min throttle to avoid log flood
                 LOGGER.debug(
                     "Inverter error (consecutive: %d) – serving cached data.",
                     self._consecutive_errors,
@@ -459,6 +594,21 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             # Zero power immediately on any error – prevents false statistics
             self._fallback_data.output_data.p1 = 0
             self._fallback_data.output_data.p2 = 0
+            # After 3 failed polls, also zero electrical detail sensors
+            # (voltage, current, grid) – inverter has clearly gone offline.
+            # Temperature is preserved as last known value.
+            if self._consecutive_errors >= 3 and self._fallback_detail is not None:
+                self._fallback_detail.v1 = 0.0
+                self._fallback_detail.v2 = 0.0
+                self._fallback_detail.c1 = 0.0
+                self._fallback_detail.c2 = 0.0
+                self._fallback_detail.gv = 0.0
+                self._fallback_detail.gf = 0.0
+                self._fallback_data = ApSystemsSensorData(
+                    output_data=self._fallback_data.output_data,
+                    alarm_info=self._fallback_data.alarm_info,
+                    detail_data=self._fallback_detail,
+                )
             self._stable_polls_after_error = 0  # reset – must re-stabilize before restore
             self._power_limit_restored = False  # allow restore on next reconnect
             self.inverter_reachable = False
@@ -467,19 +617,20 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         except Exception as err:  # noqa: BLE001
             self._consecutive_errors += 1
             if self._consecutive_errors == 1:
-                LOGGER.warning(
+                LOGGER.info(
                     "APsystems inverter unreachable – "
                     "serving cached data. Error: %s", _fmt_err(err),
                 )
             elif self._consecutive_errors == 10:
-                LOGGER.warning(
+                LOGGER.info(
                     "APsystems inverter still unreachable after %d polls (%ds). "
                     "Check network connection. Error: %s",
                     self._consecutive_errors,
                     self._consecutive_errors * self.update_interval.total_seconds(),
                     _fmt_err(err),
                 )
-            else:
+            elif self._consecutive_errors % 50 == 0:
+                # ~10 min throttle (50 × 12 s) to avoid log flood
                 LOGGER.debug(
                     "Inverter unreachable (consecutive: %d) – serving cached data.",
                     self._consecutive_errors,
@@ -487,6 +638,21 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             # Zero power immediately on any error – prevents false statistics
             self._fallback_data.output_data.p1 = 0
             self._fallback_data.output_data.p2 = 0
+            # After 3 failed polls, also zero electrical detail sensors
+            # (voltage, current, grid) – inverter has clearly gone offline.
+            # Temperature is preserved as last known value.
+            if self._consecutive_errors >= 3 and self._fallback_detail is not None:
+                self._fallback_detail.v1 = 0.0
+                self._fallback_detail.v2 = 0.0
+                self._fallback_detail.c1 = 0.0
+                self._fallback_detail.c2 = 0.0
+                self._fallback_detail.gv = 0.0
+                self._fallback_detail.gf = 0.0
+                self._fallback_data = ApSystemsSensorData(
+                    output_data=self._fallback_data.output_data,
+                    alarm_info=self._fallback_data.alarm_info,
+                    detail_data=self._fallback_detail,
+                )
             self._stable_polls_after_error = 0  # reset – must re-stabilize before restore
             self._power_limit_restored = False  # allow restore on next reconnect
             self.inverter_reachable = False
@@ -494,6 +660,48 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         finally:
             self._poll_active = False
+
+    async def _get_output_data_detail(self) -> ReturnOutputDataDetail | None:
+        """Fetch extended output data from /getOutputDataDetail.
+
+        Returns a zero-filled fallback (with last known temperature) if the
+        endpoint is not available or the inverter is temporarily unreachable.
+        Returns None only when the endpoint is confirmed unsupported by firmware.
+        """
+        if self._detail_supported is False:
+            return None
+        try:
+            resp = await self.api._request("getOutputDataDetail")
+            if resp and resp.get("data"):
+                self._detail_supported = True
+                d = resp["data"]
+                detail = ReturnOutputDataDetail(
+                    v1=float(d.get("v1", 0)) or None,
+                    v2=float(d.get("v2", 0)) or None,
+                    c1=float(d.get("c1", 0)) or None,
+                    c2=float(d.get("c2", 0)) or None,
+                    gv=float(d.get("gv", 0)) or None,
+                    gf=float(d.get("gf", 0)) or None,
+                    t=float(d.get("t", 0)) or None,
+                )
+                # Track last known temperature for offline preservation
+                if detail.t is not None:
+                    self._last_temperature = detail.t
+                # Update fallback detail with current zeros + last temperature
+                self._fallback_detail = ReturnOutputDataDetail(
+                    v1=0.0, v2=0.0,
+                    c1=0.0, c2=0.0,
+                    gv=0.0, gf=0.0,
+                    t=self._last_temperature,
+                )
+                return detail
+        except Exception as err:  # noqa: BLE001
+            if self._detail_supported is None:
+                LOGGER.debug(
+                    "getOutputDataDetail not available on this firmware: %s", _fmt_err(err)
+                )
+                self._detail_supported = False
+        return None
 
     async def _do_fetch(self) -> ApSystemsSensorData:
         """Perform the actual API calls and return sensor data."""
@@ -565,15 +773,48 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                         inverter_limit, self.current_max_power
                     )
                     if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
-                        await self.api.set_max_power(int(self.current_max_power))
-                        LOGGER.info(
-                            "Restored power limit to %sW after inverter restart "
-                            "(inverter reported %sW).",
-                            self.current_max_power,
-                            inverter_limit,
-                        )
+                        # RAM value differs – try to restore via flash first (survives restarts)
+                        ok, reason = await self._try_set_default_max_power(int(self.current_max_power))
+                        if ok:
+                            LOGGER.info(
+                                "Restored power limit to %sW (flash) after inverter restart "
+                                "(inverter reported %sW).",
+                                self.current_max_power, inverter_limit,
+                            )
+                        else:
+                            # Flash failed (e.g. cooldown) – fall back to RAM restore
+                            try:
+                                await self.api.set_max_power(int(self.current_max_power))
+                                LOGGER.info(
+                                    "Restored power limit to %sW (RAM) after inverter restart "
+                                    "(inverter reported %sW). Flash: %s",
+                                    self.current_max_power, inverter_limit, reason,
+                                )
+                            except Exception as ram_err:  # noqa: BLE001
+                                LOGGER.warning(
+                                    "Could not restore power limit after inverter restart: %s",
+                                    _fmt_err(ram_err),
+                                )
                         self._power_limit_restored = True
                     else:
+                        # RAM matches – but if our stored value exceeds the flash limit,
+                        # sync flash so the inverter does not silently cap on next restart.
+                        if (
+                            self.default_max_power is not None
+                            and int(self.current_max_power) > self.default_max_power
+                        ):
+                            ok, reason = await self._try_set_default_max_power(int(self.current_max_power))
+                            if ok:
+                                LOGGER.info(
+                                    "Synced flash power limit to %sW (was %sW) "
+                                    "to prevent silent capping after inverter restart.",
+                                    int(self.current_max_power), self.default_max_power,
+                                )
+                            else:
+                                LOGGER.info(
+                                    "Flash power limit not yet synced to %sW (current: %sW): %s",
+                                    int(self.current_max_power), self.default_max_power, reason,
+                                )
                         LOGGER.debug(
                             "Power limit OK after restart: inverter=%sW, stored=%sW.",
                             inverter_limit, self.current_max_power,
@@ -594,6 +835,18 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             # and prevents lifetime energy jumps after cold start
             await self._save_state()
 
-        result = ApSystemsSensorData(output_data=output_data, alarm_info=alarm_info)
+        detail_data = await self._get_output_data_detail()
+
+        # When detail_data is None (transient error while endpoint IS supported),
+        # use the zero-fallback so sensors show 0 instead of "unknown"
+        effective_detail = detail_data if detail_data is not None else (
+            self._fallback_detail if self._detail_supported else None
+        )
+
+        result = ApSystemsSensorData(
+            output_data=output_data,
+            alarm_info=alarm_info,
+            detail_data=effective_detail,
+        )
         self._fallback_data = result
         return result

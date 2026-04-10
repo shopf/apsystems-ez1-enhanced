@@ -8,6 +8,8 @@ from typing import Any
 
 from APsystemsEZ1 import ReturnOutputData
 
+from homeassistant.const import UnitOfElectricCurrent, UnitOfElectricPotential, UnitOfFrequency, UnitOfTemperature
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -20,7 +22,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import DiscoveryInfoType, StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .coordinator import ApSystemsConfigEntry, ApSystemsData, ApSystemsDataCoordinator
+from .coordinator import ApSystemsConfigEntry, ApSystemsData, ApSystemsDataCoordinator, ReturnOutputDataDetail
 from .entity import ApSystemsEntity
 
 
@@ -110,6 +112,84 @@ SENSORS: tuple[ApsystemsLocalApiSensorDescription, ...] = (
 )
 
 
+@dataclass(frozen=True, kw_only=True)
+class ApsystemsDetailSensorDescription(SensorEntityDescription):
+    """Describes APsystems detail sensor entity (from getOutputDataDetail)."""
+
+    value_fn: Callable[[ReturnOutputDataDetail], float | None]
+
+
+DETAIL_SENSORS: tuple[ApsystemsDetailSensorDescription, ...] = (
+    # ── PV Input voltages ─────────────────────────────────────────────────────
+    ApsystemsDetailSensorDescription(
+        key="voltage_p1",
+        translation_key="voltage_p1",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda d: d.v1,
+    ),
+    ApsystemsDetailSensorDescription(
+        key="voltage_p2",
+        translation_key="voltage_p2",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda d: d.v2,
+    ),
+    # ── PV Input currents ─────────────────────────────────────────────────────
+    ApsystemsDetailSensorDescription(
+        key="current_p1",
+        translation_key="current_p1",
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        value_fn=lambda d: d.c1,
+    ),
+    ApsystemsDetailSensorDescription(
+        key="current_p2",
+        translation_key="current_p2",
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        value_fn=lambda d: d.c2,
+    ),
+    # ── Grid ──────────────────────────────────────────────────────────────────
+    ApsystemsDetailSensorDescription(
+        key="grid_voltage",
+        translation_key="grid_voltage",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value_fn=lambda d: d.gv,
+    ),
+    ApsystemsDetailSensorDescription(
+        key="grid_frequency",
+        translation_key="grid_frequency",
+        native_unit_of_measurement=UnitOfFrequency.HERTZ,
+        device_class=SensorDeviceClass.FREQUENCY,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        value_fn=lambda d: d.gf,
+    ),
+    # ── Temperature ───────────────────────────────────────────────────────────
+    ApsystemsDetailSensorDescription(
+        key="inverter_temperature",
+        translation_key="inverter_temperature",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value_fn=lambda d: d.t,
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ApSystemsConfigEntry,
@@ -128,6 +208,11 @@ async def async_setup_entry(
     # immediately see which firmware they are running and correlate it with
     # known compatibility issues – was silently stored but never surfaced.
     entities.append(ApSystemsFirmwareSensor(data=config))
+
+    # Detail sensors (getOutputDataDetail) – added always, show unavailable
+    # on older firmware that doesn't support the endpoint
+    for desc in DETAIL_SENSORS:
+        entities.append(ApSystemsDetailSensorEntity(data=config, entity_description=desc))
 
     add_entities(entities)
 
@@ -170,6 +255,53 @@ class ApSystemsSensorWithDescription(
         if self.coordinator.data is None:
             return None
         return self.entity_description.value_fn(self.coordinator.data.output_data)
+
+
+class ApSystemsDetailSensorEntity(
+    CoordinatorEntity[ApSystemsDataCoordinator], ApSystemsEntity, SensorEntity
+):
+    """Sensor for data from /getOutputDataDetail endpoint.
+
+    Shows as unavailable on firmware that does not support the endpoint.
+    """
+
+    entity_description: ApsystemsDetailSensorDescription
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        data: ApSystemsData,
+        entity_description: ApsystemsDetailSensorDescription,
+    ) -> None:
+        """Initialize the detail sensor."""
+        super().__init__(data.coordinator)
+        ApSystemsEntity.__init__(self, data)
+        self.entity_description = entity_description
+        self._attr_unique_id = f"{data.device_id}_{entity_description.key}"
+
+    @property
+    def native_value(self) -> StateType:
+        """Return value of sensor.
+
+        When the inverter is offline, detail_data falls back to a zero-filled
+        object (v, c, gv, gf = 0) with the last known temperature preserved.
+        Returns None only before the first successful poll or when firmware
+        does not support the endpoint.
+        """
+        if self.coordinator.data is None:
+            return None
+        detail = self.coordinator.data.detail_data
+        if detail is None:
+            return None
+        return self.entity_description.value_fn(detail)
+
+    @property
+    def available(self) -> bool:
+        """Return False if firmware does not support getOutputDataDetail."""
+        if self.coordinator._detail_supported is False:
+            return False
+        return super().available
 
 
 class ApSystemsFirmwareSensor(

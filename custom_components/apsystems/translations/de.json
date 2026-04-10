@@ -53,6 +53,27 @@
       },
       "firmware_version": {
         "name": "Firmware-Version"
+      },
+      "voltage_p1": {
+        "name": "DC-Spannung P1"
+      },
+      "voltage_p2": {
+        "name": "DC-Spannung P2"
+      },
+      "current_p1": {
+        "name": "DC-Strom P1"
+      },
+      "current_p2": {
+        "name": "DC-Strom P2"
+      },
+      "grid_voltage": {
+        "name": "Netzspannung"
+      },
+      "grid_frequency": {
+        "name": "Netzfrequenz"
+      },
+      "inverter_temperature": {
+        "name": "Wechselrichter Temperatur"
       }
     },
     "binary_sensor": {

@@ -53,6 +53,27 @@
       },
       "firmware_version": {
         "name": "Firmware version"
+      },
+      "voltage_p1": {
+        "name": "DC Voltage P1"
+      },
+      "voltage_p2": {
+        "name": "DC Voltage P2"
+      },
+      "current_p1": {
+        "name": "DC Current P1"
+      },
+      "current_p2": {
+        "name": "DC Current P2"
+      },
+      "grid_voltage": {
+        "name": "Grid Voltage"
+      },
+      "grid_frequency": {
+        "name": "Grid Frequency"
+      },
+      "inverter_temperature": {
+        "name": "Inverter Temperature"
       }
     },
     "binary_sensor": {
