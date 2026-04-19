@@ -74,6 +74,9 @@
       },
       "inverter_temperature": {
         "name": "Inverter Temperature"
+      },
+      "flash_write_count": {
+        "name": "Flash Write Count"
       }
     },
     "binary_sensor": {

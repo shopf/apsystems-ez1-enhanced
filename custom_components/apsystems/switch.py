@@ -9,6 +9,7 @@ from APsystemsEZ1 import APsystemsEZ1M
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -48,6 +49,24 @@ class ApSystemsInverterSwitch(
         """Return true if inverter is on."""
         return self._is_on
 
+    def _inverter_operable(self) -> bool:
+        """Return True if the inverter is reachable and not in standby/off state.
+
+        Both conditions must hold before sending a power command:
+        - inverter_reachable: the API is responding (False after 3 failed polls)
+        - alarm_info.operating: the inverter is not in standby/off state
+
+        When the EZ1 is switched off via this toggle its API still responds,
+        but operating = False. When it has crashed or lost power it becomes
+        unreachable. Blocking commands in both cases prevents sending orders
+        into the void and gives the user clear feedback.
+        """
+        if not self.coordinator.inverter_reachable:
+            return False
+        if self.coordinator.data is not None:
+            return self.coordinator.data.alarm_info.operating
+        return False
+
     async def _wait_for_poll(self) -> bool:
         """Wait for any active poll to finish. Returns False on timeout."""
         waited = 0
@@ -61,6 +80,10 @@ class ApSystemsInverterSwitch(
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the inverter on."""
+        if not self._inverter_operable():
+            raise HomeAssistantError(
+                "Command not sent: inverter is unreachable or not operating."
+            )
         if not await self._wait_for_poll():
             return
         try:
@@ -73,6 +96,10 @@ class ApSystemsInverterSwitch(
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the inverter off."""
+        if not self._inverter_operable():
+            raise HomeAssistantError(
+                "Command not sent: inverter is unreachable or not operating."
+            )
         if not await self._wait_for_poll():
             return
         try:

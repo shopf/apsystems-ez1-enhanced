@@ -74,6 +74,9 @@
       },
       "inverter_temperature": {
         "name": "Wechselrichter Temperatur"
+      },
+      "flash_write_count": {
+        "name": "Flash-Schreibvorgänge"
       }
     },
     "binary_sensor": {

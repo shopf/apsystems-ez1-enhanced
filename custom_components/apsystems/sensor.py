@@ -216,6 +216,30 @@ async def async_setup_entry(
 
     add_entities(entities)
 
+    # Flash write counter – registered dynamically ONLY on older firmware
+    # (where setMaxPower writes flash directly). The coordinator calls this
+    # callback exactly once after confirming that getDefaultMaxPower is not
+    # available. On newer firmware the callback is never called and the sensor
+    # is never added – it will not appear in the UI at all.
+    def _add_flash_sensor() -> None:
+        add_entities([ApSystemsFlashWriteCountSensor(data=config)])
+        LOGGER.info(
+            "Flash write count sensor registered: older firmware detected "
+            "(getDefaultMaxPower not available). setMaxPower writes flash directly."
+        )
+
+    config.coordinator._add_flash_sensor = _add_flash_sensor
+
+    # If older firmware was already confirmed in a prior session
+    # (flash_write_count > 0 restored from storage), register immediately
+    # without waiting for the first poll – the inverter may be offline at startup.
+    if (
+        config.coordinator.flash_write_count > 0
+        and not config.coordinator._flash_sensor_registered
+    ):
+        config.coordinator._flash_sensor_registered = True
+        _add_flash_sensor()
+
 
 class ApSystemsSensorWithDescription(
     CoordinatorEntity[ApSystemsDataCoordinator], ApSystemsEntity, SensorEntity
@@ -329,3 +353,36 @@ class ApSystemsFirmwareSensor(
     def native_value(self) -> str:
         """Return firmware version string."""
         return self.coordinator.device_version
+
+
+class ApSystemsFlashWriteCountSensor(
+    CoordinatorEntity[ApSystemsDataCoordinator], ApSystemsEntity, SensorEntity
+):
+    """Diagnostic sensor counting setMaxPower calls that write to flash.
+
+    Only registered on older firmware without getDefaultMaxPower support,
+    where every setMaxPower call writes directly to flash memory.
+    On newer firmware this class is never instantiated – the sensor does
+    not appear in the UI at all.
+
+    Flash memory has a limited write cycle lifespan (~100,000 writes).
+    This counter helps users track cumulative wear and decide whether to
+    update firmware to a version that supports RAM-only power limit changes.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "flash_write_count"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:memory"
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    def __init__(self, data: ApSystemsData) -> None:
+        """Initialize flash write count sensor."""
+        super().__init__(data.coordinator)
+        ApSystemsEntity.__init__(self, data)
+        self._attr_unique_id = f"{data.device_id}_flash_write_count"
+
+    @property
+    def native_value(self) -> int:
+        """Return total number of flash writes since integration install."""
+        return self.coordinator.flash_write_count

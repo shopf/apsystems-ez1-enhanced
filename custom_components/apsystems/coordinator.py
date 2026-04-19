@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 from APsystemsEZ1 import (
     APsystemsEZ1M,
@@ -148,11 +148,14 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
     # Device IP address shown in device info
     device_ip: str = "unknown"
 
-    # Timestamp of the last successful setDefaultMaxPower increase.
-    # The EZ1 firmware enforces a 15-minute cooldown before the flash limit
-    # can be raised again. Tracked so we can report the remaining wait time.
-    _last_flash_increase_time: datetime | None = None
-    _FLASH_COOLDOWN_SECONDS: int = 15 * 60  # 900 s
+    # Date of the last flash-write warning (older firmware path).
+    # Used to throttle the warning to at most once per day.
+    _last_flash_warning_date: date | None = None
+
+    # Count of setMaxPower calls that write to flash (older firmware without
+    # getDefaultMaxPower). Persisted across restarts. Shown as a diagnostic
+    # sensor so users can track cumulative flash wear.
+    flash_write_count: int = 0
 
     def __init__(
         self,
@@ -203,6 +206,11 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             STORE_VERSION,
             f"{STORE_KEY}_{config_entry.entry_id}",
         )
+        # Callback registered by sensor platform to dynamically add the
+        # flash write count sensor after firmware type is confirmed.
+        # Only called once, only when older firmware is detected.
+        self._add_flash_sensor: object = None  # set by async_setup_entry
+        self._flash_sensor_registered: bool = False
 
     async def _async_setup(self) -> None:
         """Set up coordinator.
@@ -238,80 +246,100 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self.api.max_power = int(self.current_max_power or 800)
             self.api.min_power = 30
 
-    async def _try_set_default_max_power(self, new_value: int) -> tuple[bool, str | None]:
-        """Attempt to raise the flash power limit via setDefaultMaxPower.
+    async def _reset_flash_to_hardware_max(self) -> None:
+        """Reset the flash power limit to the hardware maximum via setDefaultMaxPower.
 
-        The EZ1 firmware enforces a 15-minute cooldown before the flash limit
-        can be raised again. This method:
-        - Returns (True, None) on success and updates default_max_power.
-        - Returns (False, reason_str) on failure, where reason_str is a
-          human-readable message including the remaining cooldown time when
-          the 15-minute lock is the likely cause.
+        Background (verified by hardware tests):
+        - On newer firmware (1.9.x+): setMaxPower writes RAM only. After each
+          nightly shutdown the inverter reloads the flash value into RAM.
+          getDefaultMaxPower reads the flash value; setDefaultMaxPower writes it.
+        - On older firmware: setMaxPower writes flash directly and the value
+          survives power cycles – no restore needed there.
 
-        Lowering the flash limit is always allowed (no cooldown).
+        Strategy to protect flash longevity:
+        - Call setDefaultMaxPower exactly ONCE to set flash to the hardware
+          maximum (e.g. 800W for EZ1-M, 1800W for EZ1-D).
+        - After that, NEVER write flash again. All user-visible power limit
+          changes use setMaxPower (RAM only).
+        - Each morning when the inverter restarts, HA detects the RAM/stored
+          mismatch and restores the user's limit via setMaxPower.
+
+        If the reset fails (e.g. firmware rate-limit on increases), it is
+        retried on the next call – which happens on the next HA restart or
+        when _fetch_max_power is called again after a failed poll cycle.
+        default_max_power remains at the old value until the reset succeeds,
+        so the retry condition (default_max_power != hardware_max) stays True.
         """
-        is_increase = (
-            self.default_max_power is not None and new_value > self.default_max_power
-        )
-
+        hardware_max = int(self.api.max_power or 800)
+        if self.default_max_power == hardware_max:
+            LOGGER.debug(
+                "Flash already at hardware maximum (%sW) – no write needed.", hardware_max
+            )
+            return
         try:
-            await self.api._request(f"setDefaultMaxPower?p={new_value}")
-            # Success – update cached flash value and record timestamp for increases
-            self.default_max_power = new_value
-            if is_increase:
-                self._last_flash_increase_time = datetime.now()
-            return True, None
+            await self.api._request(f"setDefaultMaxPower?p={hardware_max}")
+            LOGGER.info(
+                "Flash power limit reset to hardware maximum %sW "
+                "(was %sW). Flash will not be written again.",
+                hardware_max, self.default_max_power,
+            )
+            self.default_max_power = hardware_max
+            await self._save_state()  # persist so restart knows reset is done
         except Exception as err:  # noqa: BLE001
-            reason = _fmt_err(err)
-            if is_increase:
-                # Estimate remaining cooldown from last successful increase
-                if self._last_flash_increase_time is not None:
-                    elapsed = (datetime.now() - self._last_flash_increase_time).total_seconds()
-                    remaining = max(0, self._FLASH_COOLDOWN_SECONDS - int(elapsed))
-                    if remaining > 0:
-                        mins = remaining // 60
-                        secs = remaining % 60
-                        wait_hint = (
-                            f"Bitte in {mins} Min. {secs} Sek. erneut versuchen."
-                            if mins > 0
-                            else f"Bitte in {secs} Sek. erneut versuchen."
-                        )
-                        return False, f"{reason} – {wait_hint}"
-                # No prior timestamp: cooldown may apply, but duration unknown
-                return False, (
-                    f"{reason} – Die Firmware erlaubt eine Erhöhung erst nach "
-                    f"15 Minuten. Bitte später erneut versuchen."
-                )
-            return False, reason
+            LOGGER.warning(
+                "Could not reset flash power limit to %sW: %s. "
+                "Will retry on next startup. RAM-only restore will still work correctly.",
+                hardware_max, _fmt_err(err),
+            )
+            # Do NOT update default_max_power – keeps retry condition True
 
     async def _fetch_max_power(self) -> None:
-        """Fetch the current and default power limits from the inverter.
+        """Fetch the current power limits from the inverter.
 
-        On firmware >= 1.9.x: getDefaultMaxPower returns the flash value,
-        getMaxPower returns the RAM value (reset to flash on each restart).
-        On older firmware: getMaxPower writes directly to flash.
-        We always use the default (flash) value as our reference.
+        On firmware >= 1.9.x: getDefaultMaxPower = flash (survives restart),
+        getMaxPower = RAM (reset to flash on each nightly shutdown).
+        On older firmware: getMaxPower = flash (persists across restarts).
+
+        After reading the flash value, _reset_flash_to_hardware_max() is
+        called once to ensure flash is at the hardware maximum. All
+        subsequent user changes use setMaxPower (RAM only).
         """
         # Try getDefaultMaxPower first (firmware 1.9.x+)
         try:
             resp = await self.api._request("getDefaultMaxPower")
             if resp and resp.get("data", {}).get("power"):
                 self.default_max_power = int(resp["data"]["power"])
-                self.current_max_power = float(self.default_max_power)
+                # Use RAM value (getMaxPower) as the user's current limit –
+                # after nightly restart it equals flash, but during the day
+                # the user may have set a different RAM value.
+                try:
+                    ram_val = await self.api.get_max_power()
+                    if ram_val is not None:
+                        self.current_max_power = float(ram_val)
+                    else:
+                        self.current_max_power = float(self.default_max_power)
+                except Exception:  # noqa: BLE001
+                    self.current_max_power = float(self.default_max_power)
                 LOGGER.info(
-                    "Power limit fetched from flash (getDefaultMaxPower): %sW",
-                    self.default_max_power,
+                    "Power limit – RAM (current): %sW, flash (default): %sW",
+                    self.current_max_power, self.default_max_power,
                 )
+                # One-time: reset flash to hardware max so RAM is the only
+                # value we ever change going forward.
+                await self._reset_flash_to_hardware_max()
                 return
         except Exception:  # noqa: BLE001
             pass  # endpoint not available on this firmware – fall through
 
-        # Fallback: getMaxPower (all firmware)
+        # Older firmware: getMaxPower persists across restarts (writes flash)
         try:
             result = await self.api.get_max_power()
             if result is not None:
                 self.current_max_power = float(result)
-                LOGGER.debug("Max power limit fetched (getMaxPower): %sW", self.current_max_power)
+                LOGGER.debug(
+                    "Power limit fetched (getMaxPower, flash-backed): %sW",
+                    self.current_max_power,
+                )
             else:
                 LOGGER.warning(
                     "APsystems inverter returned no value for max power limit. "
@@ -349,6 +377,17 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             mp = data.get("current_max_power")
             if mp is not None:
                 self.current_max_power = float(mp)
+            # Flash limit – restored so _reset_flash_to_hardware_max can skip
+            # the write if flash was already set to hardware max in a prior session.
+            dmp = data.get("default_max_power")
+            if dmp is not None:
+                self.default_max_power = int(dmp)
+            # Flash write counter
+            self.flash_write_count = int(data.get("flash_write_count", 0))
+            # If flash_write_count > 0, older firmware was confirmed in a prior
+            # session – register the sensor immediately when the callback arrives.
+            if self.flash_write_count > 0:
+                self._flash_sensor_registered = False  # will fire on callback set
 
             # Device info
             self.device_version = data.get("device_version", "unknown")
@@ -404,6 +443,11 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             "protected_date": self._protected_date.isoformat() if self._protected_date else None,
             # Power limit
             "current_max_power": self.current_max_power,
+            # Flash power limit (getDefaultMaxPower) – persisted so we can detect
+            # on offline startup whether the one-time flash reset was already done.
+            "default_max_power": self.default_max_power,
+            # Flash write counter (older firmware only)
+            "flash_write_count": self.flash_write_count,
             # Last known sensor values (fallback data)
             "fb_p1": fb.p1,
             "fb_p2": fb.p2,
@@ -676,13 +720,13 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 self._detail_supported = True
                 d = resp["data"]
                 detail = ReturnOutputDataDetail(
-                    v1=float(d.get("v1", 0)) or None,
-                    v2=float(d.get("v2", 0)) or None,
-                    c1=float(d.get("c1", 0)) or None,
-                    c2=float(d.get("c2", 0)) or None,
-                    gv=float(d.get("gv", 0)) or None,
-                    gf=float(d.get("gf", 0)) or None,
-                    t=float(d.get("t", 0)) or None,
+                    v1=float(d["v1"]) if d.get("v1") not in (None, "", "null") else None,
+                    v2=float(d["v2"]) if d.get("v2") not in (None, "", "null") else None,
+                    c1=float(d["c1"]) if d.get("c1") not in (None, "", "null") else None,
+                    c2=float(d["c2"]) if d.get("c2") not in (None, "", "null") else None,
+                    gv=float(d["gv"]) if d.get("gv") not in (None, "", "null") else None,
+                    gf=float(d["gf"]) if d.get("gf") not in (None, "", "null") else None,
+                    t=float(d["t"]) if d.get("t") not in (None, "", "null") else None,
                 )
                 # Track last known temperature for offline preservation
                 if detail.t is not None:
@@ -760,72 +804,64 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         self.inverter_reachable = True
 
-        # Restore power limit after inverter restart.
-        # Wait for 3 stable polls (≈36s) before attempting restore to ensure
-        # inverter is fully ready. Retry up to 5 times if it fails (Timeout).
+        # On the first successful poll where firmware type is known:
+        # if getDefaultMaxPower was never available (default_max_power is None
+        # even after _fetch_max_power ran), this is confirmed older firmware.
+        # Register the flash write count sensor exactly once.
+        # This runs AFTER async_setup_entry, so _add_flash_sensor is set.
+        if (
+            self.current_max_power is not None  # _fetch_max_power has run
+            and self.default_max_power is None  # older firmware confirmed
+            and not self._flash_sensor_registered
+            and self._add_flash_sensor is not None
+        ):
+            self._flash_sensor_registered = True
+            self._add_flash_sensor()
+
+        # Restore power limit after inverter restart (nightly shutdown on newer firmware).
+        # On newer firmware the inverter reloads flash (800W) into RAM each morning.
+        # We detect this by comparing getMaxPower with our stored current_max_power
+        # and restore via setMaxPower (RAM only – flash is never written here).
+        # Wait 3 stable polls (≈36s) before attempting to ensure the inverter is ready.
+        # Give up after 5 failed attempts to avoid endless warnings.
+        _MAX_RESTORE_ATTEMPTS = 5
         self._stable_polls_after_error += 1
         if self._stable_polls_after_error >= 3 and self.current_max_power is not None:
-            if not getattr(self, "_power_limit_restored", False):
+            _restore_attempt = self._stable_polls_after_error - 2
+            if not getattr(self, "_power_limit_restored", False) and _restore_attempt <= _MAX_RESTORE_ATTEMPTS:
                 try:
                     inverter_limit = await self.api.get_max_power()
                     LOGGER.debug(
-                        "Power limit check: inverter=%sW, stored=%sW",
-                        inverter_limit, self.current_max_power
+                        "Power limit check: inverter RAM=%sW, stored=%sW",
+                        inverter_limit, self.current_max_power,
                     )
                     if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
-                        # RAM value differs – try to restore via flash first (survives restarts)
-                        ok, reason = await self._try_set_default_max_power(int(self.current_max_power))
-                        if ok:
-                            LOGGER.info(
-                                "Restored power limit to %sW (flash) after inverter restart "
-                                "(inverter reported %sW).",
-                                self.current_max_power, inverter_limit,
-                            )
-                        else:
-                            # Flash failed (e.g. cooldown) – fall back to RAM restore
-                            try:
-                                await self.api.set_max_power(int(self.current_max_power))
-                                LOGGER.info(
-                                    "Restored power limit to %sW (RAM) after inverter restart "
-                                    "(inverter reported %sW). Flash: %s",
-                                    self.current_max_power, inverter_limit, reason,
-                                )
-                            except Exception as ram_err:  # noqa: BLE001
-                                LOGGER.warning(
-                                    "Could not restore power limit after inverter restart: %s",
-                                    _fmt_err(ram_err),
-                                )
-                        self._power_limit_restored = True
+                        # RAM differs from stored value – restore via setMaxPower only
+                        await self.api.set_max_power(int(self.current_max_power))
+                        LOGGER.info(
+                            "Restored power limit to %sW (RAM) after inverter restart "
+                            "(inverter RAM was %sW).",
+                            self.current_max_power, inverter_limit,
+                        )
                     else:
-                        # RAM matches – but if our stored value exceeds the flash limit,
-                        # sync flash so the inverter does not silently cap on next restart.
-                        if (
-                            self.default_max_power is not None
-                            and int(self.current_max_power) > self.default_max_power
-                        ):
-                            ok, reason = await self._try_set_default_max_power(int(self.current_max_power))
-                            if ok:
-                                LOGGER.info(
-                                    "Synced flash power limit to %sW (was %sW) "
-                                    "to prevent silent capping after inverter restart.",
-                                    int(self.current_max_power), self.default_max_power,
-                                )
-                            else:
-                                LOGGER.info(
-                                    "Flash power limit not yet synced to %sW (current: %sW): %s",
-                                    int(self.current_max_power), self.default_max_power, reason,
-                                )
                         LOGGER.debug(
-                            "Power limit OK after restart: inverter=%sW, stored=%sW.",
+                            "Power limit OK after restart: inverter RAM=%sW, stored=%sW.",
                             inverter_limit, self.current_max_power,
                         )
-                        self._power_limit_restored = True
+                    self._power_limit_restored = True
                 except Exception as err:  # noqa: BLE001
-                    LOGGER.warning(
-                        "Could not restore power limit (attempt %d): %s",
-                        self._stable_polls_after_error - 2, _fmt_err(err)
-                    )
-                    # Will retry on next poll automatically
+                    if _restore_attempt < _MAX_RESTORE_ATTEMPTS:
+                        LOGGER.warning(
+                            "Could not restore power limit (attempt %d/%d): %s",
+                            _restore_attempt, _MAX_RESTORE_ATTEMPTS, _fmt_err(err),
+                        )
+                    else:
+                        LOGGER.info(
+                            "Power limit restore gave up after %d attempts: %s. "
+                            "Limit will be restored on next inverter restart.",
+                            _MAX_RESTORE_ATTEMPTS, _fmt_err(err),
+                        )
+                        self._power_limit_restored = True  # stop retrying this session
 
         output_data, needs_save = self._compensate_lifetime_energy(output_data)
         if needs_save:

@@ -14,13 +14,15 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import LOGGER
-from .coordinator import ApSystemsConfigEntry, ApSystemsData, ApSystemsDataCoordinator, _fmt_err
+from .coordinator import ApSystemsConfigEntry, ApSystemsData, ApSystemsDataCoordinator
 from .entity import ApSystemsEntity
 
-# Hardware limits as defined by APsystems for the EZ1-M.
-# These are used as safe fallbacks if the inverter does not report its own limits.
+# Hardware limits used as safe fallbacks when the inverter is offline during setup.
+# EZ1-M: 30–800W. EZ1-D: 30–1800W.
+# The inverter reports its own limits via get_device_info() – these fallbacks
+# only apply when that call fails (e.g. inverter unreachable at HA startup).
 HARDWARE_MIN_POWER = 30
-HARDWARE_MAX_POWER = 800
+HARDWARE_MAX_POWER = 1800  # Upper bound covers both EZ1-M (800W) and EZ1-D (1800W)
 
 
 async def async_setup_entry(
@@ -53,21 +55,19 @@ class ApSystemsMaxPowerNumber(
 
     @property
     def native_min_value(self) -> float:
-        """Return minimum power limit.
-
-        Uses the value reported by the inverter via get_device_info(),
-        with a safe fallback to the EZ1-M hardware minimum of 30W.
-        """
+        """Return minimum power limit reported by the inverter (fallback: 30W)."""
         return float(int(self._api.min_power or HARDWARE_MIN_POWER))
 
     @property
     def native_max_value(self) -> float:
-        """Return maximum power limit.
+        """Return maximum power limit reported by the inverter.
 
-        Uses the value reported by the inverter via get_device_info(),
-        with a safe fallback to the EZ1-M hardware maximum of 800W.
-        Note: newer models like the EZ1-D support up to 1800W – the inverter
-        will report the correct value for its model via get_device_info().
+        The inverter reports its hardware maximum via get_device_info():
+        - EZ1-M: 800W
+        - EZ1-D: 1800W
+        Falls back to 1800W if the inverter was unreachable at startup so that
+        EZ1-D users are not incorrectly blocked at 800W. The actual hardware
+        limit will enforce the correct ceiling once the inverter is online.
         """
         return float(int(self._api.max_power or HARDWARE_MAX_POWER))
 
@@ -76,13 +76,27 @@ class ApSystemsMaxPowerNumber(
         """Return the current power limit from coordinator."""
         return self.coordinator.current_max_power
 
-    async def async_set_native_value(self, value: float) -> None:
-        """Set a new power limit.
+    @property
+    def available(self) -> bool:
+        """Return False when the inverter is offline or not operating.
 
-        Waits for any active poll to finish before sending the command,
-        preventing concurrent API calls on the same inverter connection.
-        Validates against the inverter's reported hardware limits before
-        sending, and catches ValueError from the library as a safety net.
+        Prevents setting a power limit when the EZ1 cannot act on it.
+        The last known limit remains stored and is restored on reconnect.
+        """
+        if not self.coordinator.inverter_reachable:
+            return False
+        if self.coordinator.data is not None:
+            return self.coordinator.data.alarm_info.operating
+        return False
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set a new power limit via setMaxPower (RAM only).
+
+        Only setMaxPower is used here – flash is never written by user actions.
+        Flash was reset to the hardware maximum once during setup
+        (_reset_flash_to_hardware_max) and is never touched again, protecting
+        flash longevity. HA stores the desired limit and restores it each
+        morning via setMaxPower when the inverter reloads flash into RAM.
         """
         min_p = self.native_min_value
         max_p = self.native_max_value
@@ -106,27 +120,24 @@ class ApSystemsMaxPowerNumber(
             self.coordinator._poll_active = True
             await self._api.set_max_power(int(value))
 
-            # Fix: if getDefaultMaxPower is available and the new value exceeds
-            # the flash limit, the inverter silently caps output at the flash value.
-            # Keep both in sync by calling setDefaultMaxPower as well.
-            default_mp = self.coordinator.default_max_power
-            if default_mp is not None and int(value) > default_mp:
-                ok, reason = await self.coordinator._try_set_default_max_power(int(value))
-                if ok:
-                    LOGGER.info(
-                        "Power limit set to %sW – flash limit also updated "
-                        "(was %sW, now %sW).",
-                        int(value), default_mp, int(value),
+            # On older firmware (no getDefaultMaxPower endpoint), setMaxPower
+            # writes directly to flash. Warn once per day so the user is aware
+            # of potential flash wear from frequent changes.
+            # On newer firmware default_max_power is set → RAM-only → no warning.
+            if self.coordinator.default_max_power is None:
+                from datetime import date as _date
+                today = _date.today()
+                self.coordinator.flash_write_count += 1
+                if self.coordinator._last_flash_warning_date != today:
+                    self.coordinator._last_flash_warning_date = today
+                    LOGGER.warning(
+                        "Power limit set to %sW. This inverter firmware does not support "
+                        "the getDefaultMaxPower endpoint – setMaxPower writes directly to "
+                        "flash memory. Frequent changes may cause flash wear over time. "
+                        "Consider updating to firmware 1.9.x or later. "
+                        "(This warning appears at most once per day.)",
+                        int(value),
                     )
-                else:
-                    LOGGER.info(
-                        "Power limit set to %sW in RAM. Flash-Grenze konnte nicht "
-                        "aktualisiert werden (aktuell %sW): %s",
-                        int(value), default_mp, reason,
-                    )
-            else:
-                LOGGER.info("Power limit set to %sW.", int(value))
-
         except ValueError as err:
             LOGGER.error("Failed to set power limit to %sW: %s", value, err)
             raise HomeAssistantError(
@@ -137,4 +148,6 @@ class ApSystemsMaxPowerNumber(
 
         self.coordinator.current_max_power = value
         self.async_write_ha_state()
-        LOGGER.info("Power limit set to %sW", value)
+        LOGGER.info("Power limit set to %sW (RAM).", int(value))
+
+

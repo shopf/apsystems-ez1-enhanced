@@ -152,7 +152,7 @@ Der EZ1-D (bis 1800W) wird unterstützt. Die Leistungsgrenze wird dynamisch vom 
 | `binary_sensor.{name}_kurzschluss_eingang_2` | Kurzschluss Eingang 2 (Diagnose) | – |
 | `sensor.{name}_firmware_version` | Firmware-Version (Diagnose) | – |
 | `binary_sensor.{name}_wechselrichter_aktiv` | In Betrieb / Ausgeschaltet (Diagnose) | – |
-| `number.{name}_leistungsbegrenzung` | Maximale Ausgangsleistung (30–800W) | W |
+| `number.{name}_leistungsbegrenzung` | Maximale Ausgangsleistung (30–800W / 30–1800W beim EZ1-D) | W |
 | `switch.{name}_wechselrichter` | Wechselrichter Ein/Aus | – |
 
 ---
