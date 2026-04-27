@@ -8,18 +8,38 @@
           "ip_address": "IP-Adresse",
           "port": "Port",
           "device_name": "Gerätename",
-          "polling_interval": "Abfrageintervall (Sekunden)"
+          "polling_interval": "Abfrageintervall (Sekunden)",
+          "lifetime_offset_p1": "Lifetime-Energie Startoffset Eingang 1 (kWh)",
+          "lifetime_offset_p2": "Lifetime-Energie Startoffset Eingang 2 (kWh)"
         },
         "data_description": {
           "ip_address": "Lokale IP-Adresse des Wechselrichters (statische IP empfohlen).",
           "port": "API-Port des Wechselrichters (Standard: 8050).",
           "device_name": "Frei wählbarer Name, z. B. 'Balkonkraftwerk' oder 'Garage Solar'.",
-          "polling_interval": "Wie oft der Wechselrichter abgefragt wird (12–60 Sekunden). Kleinere Werte erhöhen die Last auf dem Wechselrichter und können zu WLAN-Verbindungsabbrüchen führen. Standard: 12 Sekunden."
+          "polling_interval": "Wie oft der Wechselrichter abgefragt wird (12–60 Sekunden). Kleinere Werte erhöhen die Last auf dem Wechselrichter und können zu WLAN-Verbindungsabbrüchen führen. Standard: 12 Sekunden.",
+          "lifetime_offset_p1": "Optional. Nur ausfüllen wenn der interne Zähler des Wechselrichters bereits einmal auf 0 zurückgesprungen ist (bekannter Firmware-Bug bei ~540 kWh). Wert in kWh eingeben der vor dem Reset bereits erzeugt wurde, z. B. '542.3'. Leer lassen wenn kein Reset stattgefunden hat.",
+          "lifetime_offset_p2": "Gleiche Eingabe wie oben, aber für Eingang 2. Leer lassen wenn kein Reset stattgefunden hat."
+        }
+      },
+      "reconfigure": {
+        "title": "APsystems Einstellungen anpassen",
+        "description": "Verbindungsdaten oder Lifetime-Energie-Offsets korrigieren.",
+        "data": {
+          "ip_address": "IP-Adresse",
+          "port": "Port",
+          "polling_interval": "Abfrageintervall (Sekunden)",
+          "lifetime_offset_p1": "Lifetime-Energie Startoffset Eingang 1 (kWh)",
+          "lifetime_offset_p2": "Lifetime-Energie Startoffset Eingang 2 (kWh)"
+        },
+        "data_description": {
+          "lifetime_offset_p1": "Aktuell gespeicherter Offset für Eingang 1. Nur ändern wenn der Wert falsch eingetragen wurde oder ein neuer Reset stattgefunden hat.",
+          "lifetime_offset_p2": "Aktuell gespeicherter Offset für Eingang 2."
         }
       }
     },
     "error": {
-      "cannot_connect": "Verbindung zum Wechselrichter fehlgeschlagen. IP-Adresse und Port prüfen."
+      "cannot_connect": "Verbindung zum Wechselrichter fehlgeschlagen. IP-Adresse und Port prüfen.",
+      "invalid_offset": "Ungültiger Offset-Wert. Bitte eine Zahl in kWh eingeben, z. B. '542.3', oder das Feld leer lassen."
     }
   },
   "entity": {

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date, timedelta
+import time as _monotonic_time
 
 from APsystemsEZ1 import (
     APsystemsEZ1M,
@@ -17,8 +18,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
-from .const import CONF_POLLING_INTERVAL, DOMAIN, LOGGER, POLLING_INTERVAL
+from .const import CONF_LIFETIME_OFFSET_P1, CONF_LIFETIME_OFFSET_P2, CONF_POLLING_INTERVAL, DOMAIN, LOGGER, POLLING_INTERVAL
 
 STORE_VERSION = 1
 STORE_KEY = "apsystems_lifetime_offset"
@@ -206,6 +208,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             STORE_VERSION,
             f"{STORE_KEY}_{config_entry.entry_id}",
         )
+        # Timestamp when _poll_active was last set to True.
+        # Used to detect stuck locks (e.g. after asyncio.CancelledError).
+        self._poll_active_since: float = 0.0
         # Callback registered by sensor platform to dynamically add the
         # flash write count sensor after firmware type is confirmed.
         # Only called once, only when older firmware is detected.
@@ -241,9 +246,12 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 "APsystems inverter not reachable during setup – using fallback values. "
                 "Will retry on next poll. Error: %s", _fmt_err(err)
             )
-            # Use stored values as fallback so number/switch entities
-            # show correct limits immediately even when inverter is offline
-            self.api.max_power = int(self.current_max_power or 800)
+            # Use hardware maximum as fallback for api.max_power so the number
+            # entity's upper limit is not incorrectly capped at current_max_power.
+            # current_max_power is the USER's chosen limit, not the hardware ceiling.
+            # We use 1800 (EZ1-D ceiling) as the safe fallback so EZ1-D users are
+            # never blocked. The correct value will be set on the next successful poll.
+            self.api.max_power = 1800
             self.api.min_power = 30
 
     async def _reset_flash_to_hardware_max(self) -> None:
@@ -264,13 +272,24 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         - Each morning when the inverter restarts, HA detects the RAM/stored
           mismatch and restores the user's limit via setMaxPower.
 
-        If the reset fails (e.g. firmware rate-limit on increases), it is
-        retried on the next call – which happens on the next HA restart or
-        when _fetch_max_power is called again after a failed poll cycle.
-        default_max_power remains at the old value until the reset succeeds,
-        so the retry condition (default_max_power != hardware_max) stays True.
+        Safety guard: we only write if we have a confirmed hardware_max from
+        get_device_info() (device_version != 'unknown'). Without this guard
+        the fallback of 800W would incorrectly cap an EZ1-D (1800W).
         """
-        hardware_max = int(self.api.max_power or 800)
+        # Only proceed if device_info was successfully fetched.
+        # api.max_power defaults to 800 before get_device_info() runs –
+        # using that fallback would wrongly cap EZ1-D at 800W.
+        if self.device_version == "unknown":
+            LOGGER.debug(
+                "Skipping flash reset – device info not yet known. Will retry after next successful poll."
+            )
+            return
+
+        hardware_max = int(self.api.max_power)
+        if hardware_max <= 0:
+            LOGGER.debug("Skipping flash reset – hardware max is not valid (%sW).", hardware_max)
+            return
+
         if self.default_max_power == hardware_max:
             LOGGER.debug(
                 "Flash already at hardware maximum (%sW) – no write needed.", hardware_max
@@ -356,8 +375,19 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         Offsets survive HA restarts so the compensated lifetime total
         remains correct even after the firmware overflow counter resets.
+
+        The user can enter an initial offset in the config flow (setup or
+        reconfigure) to correct the lifetime total after a firmware overflow
+        reset. The last applied config-entry offset is stored alongside the
+        running offset so we can detect when the user has changed it and
+        apply only the delta – without touching the accumulated overflow
+        compensation that is already correct.
         """
         data = await self._store.async_load()
+        cfg = self.config_entry.data
+        cfg_p1 = float(cfg.get(CONF_LIFETIME_OFFSET_P1, 0.0))
+        cfg_p2 = float(cfg.get(CONF_LIFETIME_OFFSET_P2, 0.0))
+
         if data:
             # Lifetime energy overflow compensation
             self._te1_offset = float(data.get("te1_offset", 0.0))
@@ -377,17 +407,12 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             mp = data.get("current_max_power")
             if mp is not None:
                 self.current_max_power = float(mp)
-            # Flash limit – restored so _reset_flash_to_hardware_max can skip
-            # the write if flash was already set to hardware max in a prior session.
             dmp = data.get("default_max_power")
             if dmp is not None:
                 self.default_max_power = int(dmp)
-            # Flash write counter
             self.flash_write_count = int(data.get("flash_write_count", 0))
-            # If flash_write_count > 0, older firmware was confirmed in a prior
-            # session – register the sensor immediately when the callback arrives.
             if self.flash_write_count > 0:
-                self._flash_sensor_registered = False  # will fire on callback set
+                self._flash_sensor_registered = False
 
             # Device info
             self.device_version = data.get("device_version", "unknown")
@@ -395,14 +420,13 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
             # Restore fallback data so sensors show last known values immediately
             fb = self._fallback_data.output_data
-            fb.p1 = 0.0  # power always 0 at startup – inverter may be off
+            fb.p1 = 0.0
             fb.p2 = 0.0
             fb.e1 = float(data.get("fb_e1", 0.0))
             fb.e2 = float(data.get("fb_e2", 0.0))
             fb.te1 = float(data.get("fb_te1", 0.0))
             fb.te2 = float(data.get("fb_te2", 0.0))
 
-            # Restore detail fallback values (0 for electrical, last known for temperature)
             self._last_temperature = data.get("fb_temperature")
             self._fallback_detail = ReturnOutputDataDetail(
                 v1=0.0, v2=0.0,
@@ -416,6 +440,23 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 detail_data=self._fallback_detail,
             )
 
+            # Detect reconfigure: if the config-entry offset differs from
+            # the last value we applied, the user changed it → apply the delta.
+            prev_p1 = float(data.get("applied_offset_p1", 0.0))
+            prev_p2 = float(data.get("applied_offset_p2", 0.0))
+            delta_p1 = cfg_p1 - prev_p1
+            delta_p2 = cfg_p2 - prev_p2
+            if abs(delta_p1) > 0.0001 or abs(delta_p2) > 0.0001:
+                self._te1_offset += delta_p1
+                self._te2_offset += delta_p2
+                LOGGER.info(
+                    "Lifetime energy offset updated via reconfigure – "
+                    "P1 delta: %+.5f kWh (new total offset: %.5f kWh), "
+                    "P2 delta: %+.5f kWh (new total offset: %.5f kWh)",
+                    delta_p1, self._te1_offset,
+                    delta_p2, self._te2_offset,
+                )
+
             LOGGER.info(
                 "Restored state from storage – "
                 "te1_out=%.5f kWh, te2_out=%.5f kWh, "
@@ -425,10 +466,22 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 self._e1_protected, self._e2_protected,
                 self.current_max_power, self.device_version,
             )
+        else:
+            # First start – no storage yet. Apply the user-entered initial
+            # lifetime offset from the config entry (0.0 if not provided).
+            if cfg_p1 or cfg_p2:
+                self._te1_offset = cfg_p1
+                self._te2_offset = cfg_p2
+                LOGGER.info(
+                    "Applied initial lifetime energy offset from setup – "
+                    "P1: %.5f kWh, P2: %.5f kWh",
+                    cfg_p1, cfg_p2,
+                )
 
     async def _save_state(self) -> None:
         """Persist all coordinator state to storage so it survives HA restarts."""
         fb = self._fallback_data.output_data
+        cfg = self.config_entry.data
         await self._store.async_save({
             # Lifetime energy overflow compensation
             "te1_offset": self._te1_offset,
@@ -437,6 +490,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             "te2_last_raw": self._te2_last_raw,
             "te1_last_out": self._te1_last_out,
             "te2_last_out": self._te2_last_out,
+            # Last applied config-entry offset – used to detect reconfigure changes
+            "applied_offset_p1": float(cfg.get(CONF_LIFETIME_OFFSET_P1, 0.0)),
+            "applied_offset_p2": float(cfg.get(CONF_LIFETIME_OFFSET_P2, 0.0)),
             # Today energy protection
             "e1_protected": self._e1_protected,
             "e2_protected": self._e2_protected,
@@ -530,7 +586,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # - If e1==0 and new day: legitimate reset → accept 0, start fresh
         e1_raw = output_data.e1
         e2_raw = output_data.e2
-        today = date.today()
+        today = dt_util.now().date()
 
         # Midnight reset is handled in _async_update_data – see _check_midnight_reset()
 
@@ -578,8 +634,12 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         This runs on every poll – even when the inverter is offline – so the
         reset happens at midnight and not when the inverter comes back online
         the next morning (which would show yesterday's value until first poll).
+
+        Also resets consecutive_errors so the reduced polling rate (every 5th
+        poll after 10 errors) does not carry over into the next day and block
+        the inverter from being detected when it comes back online in the morning.
         """
-        today = date.today()
+        today = dt_util.now().date()
         if self._protected_date is not None and today != self._protected_date:
             LOGGER.info(
                 "Today energy counters reset at midnight – P1: %.5f kWh, P2: %.5f kWh.",
@@ -594,6 +654,16 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._fallback_data.output_data.e1 = 0.0
             self._fallback_data.output_data.e2 = 0.0
             LOGGER.debug("Fallback data today energy reset to 0 at midnight.")
+            # Reset error counter so the morning polls are all attempted normally.
+            # Without this, the reduced polling rate (every 5th poll after 10
+            # errors) would persist into the new day and delay inverter detection.
+            if self._consecutive_errors > 0:
+                LOGGER.debug(
+                    "Consecutive error counter reset at midnight (%d → 0).",
+                    self._consecutive_errors,
+                )
+                self._consecutive_errors = 0
+                self._skip_poll_counter = 0
 
     async def _async_update_data(self) -> ApSystemsSensorData:
         """Fetch data from inverter, always returning valid data.
@@ -605,14 +675,36 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # Midnight reset runs every poll regardless of inverter state
         self._check_midnight_reset()
 
-        # Skip if another API call is already in progress
+        # Guard against stuck _poll_active lock (e.g. after CancelledError).
+        # If the lock has been held for more than 30 seconds, force-release it.
         if self._poll_active:
-            LOGGER.debug("Poll already active – returning cached data.")
-            return self._fallback_data
+            stuck_for = _monotonic_time.monotonic() - self._poll_active_since
+            if stuck_for > 30:
+                LOGGER.warning(
+                    "poll_active lock was stuck for %.0fs – force-releasing. "
+                    "This may indicate a previous poll was cancelled unexpectedly.",
+                    stuck_for,
+                )
+                self._poll_active = False
+            else:
+                LOGGER.debug("Poll already active – returning cached data.")
+                return self._fallback_data
 
+        # Reduce actual API attempts after 10 consecutive errors (inverter is
+        # very likely off for the night). Only attempt every 5th poll (~60s
+        # effective interval) to save network load and log noise.
+        # Uses a separate skip counter so consecutive_errors keeps incrementing
+        # correctly and the midnight reset (which checks consecutive_errors) works.
+        if self._consecutive_errors > 10:
+            self._skip_poll_counter = getattr(self, "_skip_poll_counter", 0) + 1
+            if self._skip_poll_counter % 5 != 0:
+                return self._fallback_data
+        else:
+            self._skip_poll_counter = 0
 
         try:
             self._poll_active = True
+            self._poll_active_since = _monotonic_time.monotonic()
             return await self._do_fetch()
 
         except InverterReturnedError:
@@ -800,6 +892,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 self._consecutive_errors,
             )
             self._consecutive_errors = 0
+            self._skip_poll_counter = 0
             self._stable_polls_after_error = 0
 
         self.inverter_reachable = True

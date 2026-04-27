@@ -8,18 +8,38 @@
           "ip_address": "IP address",
           "port": "Port",
           "device_name": "Device name",
-          "polling_interval": "Poll interval (seconds)"
+          "polling_interval": "Poll interval (seconds)",
+          "lifetime_offset_p1": "Lifetime energy start offset input 1 (kWh)",
+          "lifetime_offset_p2": "Lifetime energy start offset input 2 (kWh)"
         },
         "data_description": {
           "ip_address": "Local IP address of the inverter (static IP recommended).",
           "port": "API port of the inverter (default: 8050).",
           "device_name": "Custom name, e.g. 'Balcony Solar' or 'Garage Solar'.",
-          "polling_interval": "How often the inverter is queried (12–60 seconds). Lower values increase load on the inverter and may cause WLAN reconnects. Default: 12 seconds."
+          "polling_interval": "How often the inverter is queried (12–60 seconds). Lower values increase load on the inverter and may cause WLAN reconnects. Default: 12 seconds.",
+          "lifetime_offset_p1": "Optional. Only fill in if the inverter's internal counter has already reset to 0 (known firmware bug at ~540 kWh). Enter the amount produced before the reset in kWh, e.g. '542.3'. Leave empty if no reset has occurred.",
+          "lifetime_offset_p2": "Same as above but for input 2. Leave empty if no reset has occurred."
+        }
+      },
+      "reconfigure": {
+        "title": "Update APsystems settings",
+        "description": "Correct connection details or lifetime energy offsets.",
+        "data": {
+          "ip_address": "IP address",
+          "port": "Port",
+          "polling_interval": "Poll interval (seconds)",
+          "lifetime_offset_p1": "Lifetime energy start offset input 1 (kWh)",
+          "lifetime_offset_p2": "Lifetime energy start offset input 2 (kWh)"
+        },
+        "data_description": {
+          "lifetime_offset_p1": "Currently stored offset for input 1. Only change if the value was entered incorrectly or a new reset has occurred.",
+          "lifetime_offset_p2": "Currently stored offset for input 2."
         }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to the inverter. Check IP address and port."
+      "cannot_connect": "Failed to connect to the inverter. Check IP address and port.",
+      "invalid_offset": "Invalid offset value. Please enter a number in kWh, e.g. '542.3', or leave the field empty."
     }
   },
   "entity": {

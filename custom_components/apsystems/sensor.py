@@ -23,6 +23,7 @@ from homeassistant.helpers.typing import DiscoveryInfoType, StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import ApSystemsConfigEntry, ApSystemsData, ApSystemsDataCoordinator, ReturnOutputDataDetail
+from .const import LOGGER
 from .entity import ApSystemsEntity
 
 
