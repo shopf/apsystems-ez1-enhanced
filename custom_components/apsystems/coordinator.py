@@ -746,7 +746,12 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     detail_data=self._fallback_detail,
                 )
             self._stable_polls_after_error = 0  # reset – must re-stabilize before restore
-            self._power_limit_restored = False  # allow restore on next reconnect
+            # Only invalidate the restore flag after 3+ consecutive errors (~36s).
+            # Brief single-poll glitches (e.g. EZ1 morning startup jitter) should
+            # not trigger another setMaxPower write – the EZ1 may not yet be ready
+            # to accept commands and will silently discard them.
+            if self._consecutive_errors >= 3:
+                self._power_limit_restored = False
             self.inverter_reachable = False
             return self._fallback_data
 
@@ -790,7 +795,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     detail_data=self._fallback_detail,
                 )
             self._stable_polls_after_error = 0  # reset – must re-stabilize before restore
-            self._power_limit_restored = False  # allow restore on next reconnect
+            # Only invalidate restore flag after 3+ consecutive errors
+            if self._consecutive_errors >= 3:
+                self._power_limit_restored = False
             self.inverter_reachable = False
             return self._fallback_data
 
@@ -917,9 +924,16 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # and restore via setMaxPower (RAM only – flash is never written here).
         # Wait 3 stable polls (≈36s) before attempting to ensure the inverter is ready.
         # Give up after 5 failed attempts to avoid endless warnings.
+        # After a successful restore, verify once more after ~25 polls (~5 min) –
+        # the EZ1 may reload flash during its morning startup sequence and undo
+        # the first restore attempt.
         _MAX_RESTORE_ATTEMPTS = 5
         self._stable_polls_after_error += 1
-        if self._stable_polls_after_error >= 3 and self.current_max_power is not None:
+        _do_restore = (
+            not getattr(self, "_power_limit_restored", False)
+            or getattr(self, "_power_limit_verify_poll", None) == self._stable_polls_after_error
+        )
+        if self._stable_polls_after_error >= 3 and self.current_max_power is not None and _do_restore:
             _restore_attempt = self._stable_polls_after_error - 2
             if not getattr(self, "_power_limit_restored", False) and _restore_attempt <= _MAX_RESTORE_ATTEMPTS:
                 try:
@@ -936,6 +950,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                             "(inverter RAM was %sW).",
                             self.current_max_power, inverter_limit,
                         )
+                        # Schedule a verification poll ~5 min later to catch cases
+                        # where the EZ1 reloads flash again during morning startup
+                        self._power_limit_verify_poll = self._stable_polls_after_error + 25
                     else:
                         LOGGER.debug(
                             "Power limit OK after restart: inverter RAM=%sW, stored=%sW.",
@@ -955,6 +972,25 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                             _MAX_RESTORE_ATTEMPTS, _fmt_err(err),
                         )
                         self._power_limit_restored = True  # stop retrying this session
+            elif getattr(self, "_power_limit_verify_poll", None) == self._stable_polls_after_error:
+                # Verification poll: check if EZ1 still has the correct limit
+                try:
+                    inverter_limit = await self.api.get_max_power()
+                    if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
+                        await self.api.set_max_power(int(self.current_max_power))
+                        LOGGER.info(
+                            "Power limit re-applied to %sW (RAM) – EZ1 had reloaded "
+                            "flash (%sW) during morning startup.",
+                            self.current_max_power, inverter_limit,
+                        )
+                    else:
+                        LOGGER.debug(
+                            "Power limit verification OK: inverter RAM=%sW, stored=%sW.",
+                            inverter_limit, self.current_max_power,
+                        )
+                    self._power_limit_verify_poll = None
+                except Exception:  # noqa: BLE001
+                    self._power_limit_verify_poll = None  # give up silently
 
         output_data, needs_save = self._compensate_lifetime_energy(output_data)
         if needs_save:
