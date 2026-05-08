@@ -327,7 +327,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         try:
             resp = await self.api._request("getDefaultMaxPower")
             if resp and resp.get("data", {}).get("power"):
-                self.default_max_power = int(resp["data"]["power"])
+                self.default_max_power = int(float(resp["data"]["power"]))
                 # Use RAM value (getMaxPower) as the user's current limit –
                 # after nightly restart it equals flash, but during the day
                 # the user may have set a different RAM value.
