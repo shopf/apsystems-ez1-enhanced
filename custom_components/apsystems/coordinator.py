@@ -159,6 +159,11 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
     # sensor so users can track cumulative flash wear.
     flash_write_count: int = 0
 
+    # Desired inverter on/off state as set by the user via the switch entity.
+    # Persisted so it can be restored after the inverter reboots overnight.
+    # True = on (default), False = off.
+    inverter_switch_on: bool = True
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -413,6 +418,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self.flash_write_count = int(data.get("flash_write_count", 0))
             if self.flash_write_count > 0:
                 self._flash_sensor_registered = False
+            # Desired inverter on/off state
+            self.inverter_switch_on = bool(data.get("inverter_switch_on", True))
 
             # Device info
             self.device_version = data.get("device_version", "unknown")
@@ -504,6 +511,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             "default_max_power": self.default_max_power,
             # Flash write counter (older firmware only)
             "flash_write_count": self.flash_write_count,
+            # Desired inverter on/off state – restored after nightly reboot
+            "inverter_switch_on": self.inverter_switch_on,
             # Last known sensor values (fallback data)
             "fb_p1": fb.p1,
             "fb_p2": fb.p2,
@@ -992,7 +1001,26 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 except Exception:  # noqa: BLE001
                     self._power_limit_verify_poll = None  # give up silently
 
-        output_data, needs_save = self._compensate_lifetime_energy(output_data)
+        # Restore inverter on/off state after nightly reboot.
+        # The EZ1 always starts in the ON state after a power cycle,
+        # so if the user had it turned off, we must re-apply that command.
+        # We attempt this once per reconnect (stable_polls == 4, one poll
+        # after the power limit restore) to give the inverter time to settle.
+        if (
+            not self.inverter_switch_on
+            and self._stable_polls_after_error == 4
+            and self.data is not None
+            and self.data.alarm_info.operating
+        ):
+            try:
+                await self.api.set_device_power_status(0)
+                LOGGER.info(
+                    "Inverter switch state restored to OFF after inverter restart."
+                )
+            except Exception as err:  # noqa: BLE001
+                LOGGER.warning(
+                    "Could not restore inverter off state: %s", _fmt_err(err)
+                )
         if needs_save:
             await self._save_state()
         elif self._poll_count % 10 == 0:

@@ -42,12 +42,11 @@ class ApSystemsInverterSwitch(
         ApSystemsEntity.__init__(self, data)
         self._attr_unique_id = f"{data.device_id}_inverter_status"
         self._api: APsystemsEZ1M = data.coordinator.api
-        self._is_on: bool = True
 
     @property
     def is_on(self) -> bool:
         """Return true if inverter is on."""
-        return self._is_on
+        return self.coordinator.inverter_switch_on
 
     def _inverter_operable(self) -> bool:
         """Return True if the inverter is reachable and not in standby/off state.
@@ -89,8 +88,9 @@ class ApSystemsInverterSwitch(
         try:
             self.coordinator._poll_active = True
             await self._api.set_device_power_status(1)
-            self._is_on = True
+            self.coordinator.inverter_switch_on = True
             self.async_write_ha_state()
+            await self.coordinator._save_state()
         finally:
             self.coordinator._poll_active = False
 
@@ -105,7 +105,8 @@ class ApSystemsInverterSwitch(
         try:
             self.coordinator._poll_active = True
             await self._api.set_device_power_status(0)
-            self._is_on = False
+            self.coordinator.inverter_switch_on = False
             self.async_write_ha_state()
+            await self.coordinator._save_state()
         finally:
             self.coordinator._poll_active = False
