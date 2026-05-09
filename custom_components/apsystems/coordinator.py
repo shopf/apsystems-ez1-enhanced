@@ -1021,6 +1021,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 LOGGER.warning(
                     "Could not restore inverter off state: %s", _fmt_err(err)
                 )
+
+        output_data, needs_save = self._compensate_lifetime_energy(output_data)
         if needs_save:
             await self._save_state()
         elif self._poll_count % 10 == 0:
