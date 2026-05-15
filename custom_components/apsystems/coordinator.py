@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date, timedelta
-import time as _monotonic_time
+import time
 
 from APsystemsEZ1 import (
     APsystemsEZ1M,
@@ -208,6 +208,23 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         self._poll_count: int = 0
 
         self._consecutive_errors: int = 0
+
+        # Reduced-polling skip counter (used after 10 consecutive errors)
+        self._skip_poll_counter: int = 0
+
+        # Power limit restore state after inverter restart
+        self._power_limit_restored: bool = False
+        self._power_limit_verify_at: float = 0.0  # monotonic timestamp, 0 = not scheduled
+
+        # Switch (on/off) restore state after inverter restart
+        self._switch_restore_done: bool = False
+        self._switch_restore_verify_at: float = 0.0
+
+        # Counts successful polls after a reconnect – used for restore timing
+        self._stable_polls_after_error: int = 0
+
+        # Counter for device-info retry polls
+        self._poll_count_device: int = 0
         self._store: Store = Store(
             hass,
             STORE_VERSION,
@@ -489,43 +506,50 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         """Persist all coordinator state to storage so it survives HA restarts."""
         fb = self._fallback_data.output_data
         cfg = self.config_entry.data
-        await self._store.async_save({
-            # Lifetime energy overflow compensation
-            "te1_offset": self._te1_offset,
-            "te2_offset": self._te2_offset,
-            "te1_last_raw": self._te1_last_raw,
-            "te2_last_raw": self._te2_last_raw,
-            "te1_last_out": self._te1_last_out,
-            "te2_last_out": self._te2_last_out,
-            # Last applied config-entry offset – used to detect reconfigure changes
-            "applied_offset_p1": float(cfg.get(CONF_LIFETIME_OFFSET_P1, 0.0)),
-            "applied_offset_p2": float(cfg.get(CONF_LIFETIME_OFFSET_P2, 0.0)),
-            # Today energy protection
-            "e1_protected": self._e1_protected,
-            "e2_protected": self._e2_protected,
-            "protected_date": self._protected_date.isoformat() if self._protected_date else None,
-            # Power limit
-            "current_max_power": self.current_max_power,
-            # Flash power limit (getDefaultMaxPower) – persisted so we can detect
-            # on offline startup whether the one-time flash reset was already done.
-            "default_max_power": self.default_max_power,
-            # Flash write counter (older firmware only)
-            "flash_write_count": self.flash_write_count,
-            # Desired inverter on/off state – restored after nightly reboot
-            "inverter_switch_on": self.inverter_switch_on,
-            # Last known sensor values (fallback data)
-            "fb_p1": fb.p1,
-            "fb_p2": fb.p2,
-            "fb_e1": fb.e1,
-            "fb_e2": fb.e2,
-            "fb_te1": fb.te1,
-            "fb_te2": fb.te2,
-            # Last known temperature (preserved across offline periods)
-            "fb_temperature": self._last_temperature,
-            # Device info
-            "device_version": self.device_version,
-            "device_ip": self.device_ip,
-        })
+        try:
+            await self._store.async_save({
+                # Lifetime energy overflow compensation
+                "te1_offset": self._te1_offset,
+                "te2_offset": self._te2_offset,
+                "te1_last_raw": self._te1_last_raw,
+                "te2_last_raw": self._te2_last_raw,
+                "te1_last_out": self._te1_last_out,
+                "te2_last_out": self._te2_last_out,
+                # Last applied config-entry offset – used to detect reconfigure changes
+                "applied_offset_p1": float(cfg.get(CONF_LIFETIME_OFFSET_P1, 0.0)),
+                "applied_offset_p2": float(cfg.get(CONF_LIFETIME_OFFSET_P2, 0.0)),
+                # Today energy protection
+                "e1_protected": self._e1_protected,
+                "e2_protected": self._e2_protected,
+                "protected_date": self._protected_date.isoformat() if self._protected_date else None,
+                # Power limit
+                "current_max_power": self.current_max_power,
+                # Flash power limit (getDefaultMaxPower) – persisted so we can detect
+                # on offline startup whether the one-time flash reset was already done.
+                "default_max_power": self.default_max_power,
+                # Flash write counter (older firmware only)
+                "flash_write_count": self.flash_write_count,
+                # Desired inverter on/off state – restored after nightly reboot
+                "inverter_switch_on": self.inverter_switch_on,
+                # Last known sensor values (fallback data)
+                "fb_p1": fb.p1,
+                "fb_p2": fb.p2,
+                "fb_e1": fb.e1,
+                "fb_e2": fb.e2,
+                "fb_te1": fb.te1,
+                "fb_te2": fb.te2,
+                # Last known temperature (preserved across offline periods)
+                "fb_temperature": self._last_temperature,
+                # Device info
+                "device_version": self.device_version,
+                "device_ip": self.device_ip,
+            })
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning(
+                "Could not persist coordinator state to storage: %s. "
+                "Sensor history and power limit may not survive a restart.",
+                _fmt_err(err),
+            )
 
     def _compensate_lifetime_energy(self, output_data: ReturnOutputData) -> tuple[ReturnOutputData, bool]:
         """Compensate for two known EZ1-M lifetime energy issues:
@@ -673,6 +697,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 )
                 self._consecutive_errors = 0
                 self._skip_poll_counter = 0
+                self._switch_restore_done = False
+                self._switch_restore_verify_at = 0.0
 
     async def _async_update_data(self) -> ApSystemsSensorData:
         """Fetch data from inverter, always returning valid data.
@@ -687,7 +713,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # Guard against stuck _poll_active lock (e.g. after CancelledError).
         # If the lock has been held for more than 30 seconds, force-release it.
         if self._poll_active:
-            stuck_for = _monotonic_time.monotonic() - self._poll_active_since
+            stuck_for = time.monotonic() - self._poll_active_since
             if stuck_for > 30:
                 LOGGER.warning(
                     "poll_active lock was stuck for %.0fs – force-releasing. "
@@ -705,7 +731,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # Uses a separate skip counter so consecutive_errors keeps incrementing
         # correctly and the midnight reset (which checks consecutive_errors) works.
         if self._consecutive_errors > 10:
-            self._skip_poll_counter = getattr(self, "_skip_poll_counter", 0) + 1
+            self._skip_poll_counter += 1
             if self._skip_poll_counter % 5 != 0:
                 return self._fallback_data
         else:
@@ -713,7 +739,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         try:
             self._poll_active = True
-            self._poll_active_since = _monotonic_time.monotonic()
+            self._poll_active_since = time.monotonic()
             return await self._do_fetch()
 
         except InverterReturnedError:
@@ -812,6 +838,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         finally:
             self._poll_active = False
+            self._poll_active_since = 0.0
 
     async def _get_output_data_detail(self) -> ReturnOutputDataDetail | None:
         """Fetch extended output data from /getOutputDataDetail.
@@ -877,7 +904,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # If device info was not available during setup, retry up to 3 times
         # on subsequent polls (every 5th poll) until a value is retrieved.
         if self.device_version == "unknown" and self._device_info_retries < 3:
-            self._poll_count_device = getattr(self, "_poll_count_device", 0) + 1
+            self._poll_count_device += 1
             if self._poll_count_device % 5 == 1:
                 try:
                     device_info = await self.api.get_device_info()
@@ -910,6 +937,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._consecutive_errors = 0
             self._skip_poll_counter = 0
             self._stable_polls_after_error = 0
+            self._power_limit_restored = False
+            self._switch_restore_done = False
+            self._switch_restore_verify_at = 0.0
 
         self.inverter_reachable = True
 
@@ -933,18 +963,17 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # and restore via setMaxPower (RAM only – flash is never written here).
         # Wait 3 stable polls (≈36s) before attempting to ensure the inverter is ready.
         # Give up after 5 failed attempts to avoid endless warnings.
-        # After a successful restore, verify once more after ~25 polls (~5 min) –
+        # After a successful restore, verify once more after ~5 min (timestamp-based) –
         # the EZ1 may reload flash during its morning startup sequence and undo
         # the first restore attempt.
         _MAX_RESTORE_ATTEMPTS = 5
         self._stable_polls_after_error += 1
-        _do_restore = (
-            not getattr(self, "_power_limit_restored", False)
-            or getattr(self, "_power_limit_verify_poll", None) == self._stable_polls_after_error
-        )
+        _now = time.monotonic()
+        _verify_due = self._power_limit_verify_at > 0 and _now >= self._power_limit_verify_at
+        _do_restore = not self._power_limit_restored or _verify_due
         if self._stable_polls_after_error >= 3 and self.current_max_power is not None and _do_restore:
             _restore_attempt = self._stable_polls_after_error - 2
-            if not getattr(self, "_power_limit_restored", False) and _restore_attempt <= _MAX_RESTORE_ATTEMPTS:
+            if not self._power_limit_restored and _restore_attempt <= _MAX_RESTORE_ATTEMPTS:
                 try:
                     inverter_limit = await self.api.get_max_power()
                     LOGGER.debug(
@@ -952,16 +981,15 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                         inverter_limit, self.current_max_power,
                     )
                     if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
-                        # RAM differs from stored value – restore via setMaxPower only
                         await self.api.set_max_power(int(self.current_max_power))
                         LOGGER.info(
                             "Restored power limit to %sW (RAM) after inverter restart "
                             "(inverter RAM was %sW).",
                             self.current_max_power, inverter_limit,
                         )
-                        # Schedule a verification poll ~5 min later to catch cases
-                        # where the EZ1 reloads flash again during morning startup
-                        self._power_limit_verify_poll = self._stable_polls_after_error + 25
+                        # Schedule a verification ~5 min later (timestamp-based, not
+                        # poll-count-based so it works correctly regardless of skip rate)
+                        self._power_limit_verify_at = time.monotonic() + 300
                     else:
                         LOGGER.debug(
                             "Power limit OK after restart: inverter RAM=%sW, stored=%sW.",
@@ -981,8 +1009,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                             _MAX_RESTORE_ATTEMPTS, _fmt_err(err),
                         )
                         self._power_limit_restored = True  # stop retrying this session
-            elif getattr(self, "_power_limit_verify_poll", None) == self._stable_polls_after_error:
-                # Verification poll: check if EZ1 still has the correct limit
+            elif _verify_due:
+                # Verification: check if EZ1 still has the correct limit ~5 min after restore
+                self._power_limit_verify_at = 0.0  # clear regardless of outcome
                 try:
                     inverter_limit = await self.api.get_max_power()
                     if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
@@ -997,30 +1026,77 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                             "Power limit verification OK: inverter RAM=%sW, stored=%sW.",
                             inverter_limit, self.current_max_power,
                         )
-                    self._power_limit_verify_poll = None
                 except Exception:  # noqa: BLE001
-                    self._power_limit_verify_poll = None  # give up silently
+                    pass  # give up silently on verification failure
 
         # Restore inverter on/off state after nightly reboot.
         # The EZ1 always starts in the ON state after a power cycle,
         # so if the user had it turned off, we must re-apply that command.
-        # We attempt this once per reconnect (stable_polls == 4, one poll
-        # after the power limit restore) to give the inverter time to settle.
-        if (
-            not self.inverter_switch_on
-            and self._stable_polls_after_error == 4
-            and self.data is not None
-            and self.data.alarm_info.operating
-        ):
-            try:
-                await self.api.set_device_power_status(0)
-                LOGGER.info(
-                    "Inverter switch state restored to OFF after inverter restart."
-                )
-            except Exception as err:  # noqa: BLE001
-                LOGGER.warning(
-                    "Could not restore inverter off state: %s", _fmt_err(err)
-                )
+        # Uses the same robust retry logic as the power limit restore:
+        # - Wait 5 stable polls (≈60s) to give the inverter time to settle
+        # - Retry up to 5 times in case of morning startup glitches
+        # - Verify ~3 min later that the EZ1 actually accepted the command
+        _MAX_SWITCH_RESTORE_ATTEMPTS = 5
+        _SWITCH_RESTORE_START_POLL = 5
+        if not self.inverter_switch_on:
+            _now_sw = time.monotonic()
+            _switch_verify_due = (
+                self._switch_restore_verify_at > 0
+                and _now_sw >= self._switch_restore_verify_at
+            )
+            _switch_restore_attempt = self._stable_polls_after_error - _SWITCH_RESTORE_START_POLL + 1
+
+            if (
+                self._stable_polls_after_error >= _SWITCH_RESTORE_START_POLL
+                and not self._switch_restore_done
+                and _switch_restore_attempt <= _MAX_SWITCH_RESTORE_ATTEMPTS
+            ):
+                try:
+                    # Check current state before sending command
+                    await self.api.set_device_power_status(0)
+                    LOGGER.info(
+                        "Inverter switch state restored to OFF after inverter restart "
+                        "(attempt %d/%d).",
+                        _switch_restore_attempt, _MAX_SWITCH_RESTORE_ATTEMPTS,
+                    )
+                    # Schedule verification ~3 min later
+                    self._switch_restore_verify_at = time.monotonic() + 180
+                    self._switch_restore_done = True
+                except Exception as err:  # noqa: BLE001
+                    if _switch_restore_attempt < _MAX_SWITCH_RESTORE_ATTEMPTS:
+                        LOGGER.warning(
+                            "Could not restore inverter off state "
+                            "(attempt %d/%d): %s",
+                            _switch_restore_attempt, _MAX_SWITCH_RESTORE_ATTEMPTS,
+                            _fmt_err(err),
+                        )
+                    else:
+                        LOGGER.warning(
+                            "Could not restore inverter off state after %d attempts: %s. "
+                            "Please toggle the switch manually.",
+                            _MAX_SWITCH_RESTORE_ATTEMPTS, _fmt_err(err),
+                        )
+                        self._switch_restore_done = True  # stop retrying
+
+            elif _switch_verify_due:
+                # Verification: confirm EZ1 actually accepted the off command
+                self._switch_restore_verify_at = 0.0
+                try:
+                    # getOnOff: status "0" = ON, "1" = OFF
+                    resp = await self.api._request("getOnOff")
+                    if resp and resp.get("data", {}).get("status") == "0":
+                        # EZ1 is ON – it ignored or reset our off command → retry
+                        await self.api.set_device_power_status(0)
+                        LOGGER.info(
+                            "Inverter switch re-applied to OFF – EZ1 had reset to ON "
+                            "during morning startup."
+                        )
+                        # Schedule another verification
+                        self._switch_restore_verify_at = time.monotonic() + 180
+                    else:
+                        LOGGER.debug("Inverter switch verification OK – EZ1 is OFF.")
+                except Exception:  # noqa: BLE001
+                    pass  # give up silently on verification failure
 
         output_data, needs_save = self._compensate_lifetime_energy(output_data)
         if needs_save:
