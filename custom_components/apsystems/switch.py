@@ -78,10 +78,16 @@ class ApSystemsInverterSwitch(
         return True
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn the inverter on."""
-        if not self._inverter_operable():
+        """Turn the inverter on.
+
+        Only checks inverter_reachable – not operating – because the inverter
+        is intentionally in operating=False state when switched off by the user.
+        Blocking turn_on based on operating would prevent the user from turning
+        it back on and would leave inverter_switch_on stuck at False in storage.
+        """
+        if not self.coordinator.inverter_reachable:
             raise HomeAssistantError(
-                "Command not sent: inverter is unreachable or not operating."
+                "Command not sent: inverter is unreachable."
             )
         if not await self._wait_for_poll():
             return

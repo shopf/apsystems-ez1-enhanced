@@ -20,3 +20,8 @@ MAX_POLLING_INTERVAL = 60
 # Stored as config entry data and applied once to _te1_offset / _te2_offset.
 CONF_LIFETIME_OFFSET_P1 = "lifetime_offset_p1"
 CONF_LIFETIME_OFFSET_P2 = "lifetime_offset_p2"
+
+# Optional: user declares that the inverter is connected to a battery system.
+# Enables more frequent power limit verification after morning restart
+# (every 5 min × 10 rounds instead of every 10 min × 5 rounds).
+CONF_BATTERY_SYSTEM = "battery_system"

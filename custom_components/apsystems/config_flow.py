@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_IP_ADDRESS, CONF_PORT
 
 from .const import (
+    CONF_BATTERY_SYSTEM,
     CONF_DEVICE_NAME,
     CONF_LIFETIME_OFFSET_P1,
     CONF_LIFETIME_OFFSET_P2,
@@ -80,6 +81,7 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                             ),
                             CONF_LIFETIME_OFFSET_P1: offset_p1,
                             CONF_LIFETIME_OFFSET_P2: offset_p2,
+                            CONF_BATTERY_SYSTEM: user_input.get(CONF_BATTERY_SYSTEM, False),
                         },
                     )
 
@@ -98,6 +100,7 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(CONF_LIFETIME_OFFSET_P1, default=""): str,
                     vol.Optional(CONF_LIFETIME_OFFSET_P2, default=""): str,
+                    vol.Optional(CONF_BATTERY_SYSTEM, default=False): bool,
                 }
             ),
             errors=errors,
@@ -116,6 +119,7 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
 
         current_p1 = entry.data.get(CONF_LIFETIME_OFFSET_P1, 0.0)
         current_p2 = entry.data.get(CONF_LIFETIME_OFFSET_P2, 0.0)
+        current_battery = entry.data.get(CONF_BATTERY_SYSTEM, False)
 
         if user_input is not None:
             try:
@@ -140,6 +144,7 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                         ),
                         CONF_LIFETIME_OFFSET_P1: offset_p1,
                         CONF_LIFETIME_OFFSET_P2: offset_p2,
+                        CONF_BATTERY_SYSTEM: user_input.get(CONF_BATTERY_SYSTEM, False),
                     },
                 )
 
@@ -168,6 +173,7 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                         CONF_LIFETIME_OFFSET_P2,
                         default=str(current_p2) if current_p2 else "",
                     ): str,
+                    vol.Optional(CONF_BATTERY_SYSTEM, default=current_battery): bool,
                 }
             ),
             errors=errors,

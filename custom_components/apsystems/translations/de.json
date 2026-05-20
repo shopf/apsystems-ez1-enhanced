@@ -10,7 +10,8 @@
           "device_name": "Gerätename",
           "polling_interval": "Abfrageintervall (Sekunden)",
           "lifetime_offset_p1": "Lifetime-Energie Startoffset Eingang 1 (kWh)",
-          "lifetime_offset_p2": "Lifetime-Energie Startoffset Eingang 2 (kWh)"
+          "lifetime_offset_p2": "Lifetime-Energie Startoffset Eingang 2 (kWh)",
+          "battery_system": "Batterie-System (Speicher angeschlossen)"
         },
         "data_description": {
           "ip_address": "Lokale IP-Adresse des Wechselrichters (statische IP empfohlen).",
@@ -18,7 +19,8 @@
           "device_name": "Frei wählbarer Name, z. B. 'Balkonkraftwerk' oder 'Garage Solar'.",
           "polling_interval": "Wie oft der Wechselrichter abgefragt wird (12–60 Sekunden). Kleinere Werte erhöhen die Last auf dem Wechselrichter und können zu WLAN-Verbindungsabbrüchen führen. Standard: 12 Sekunden.",
           "lifetime_offset_p1": "Optional. Nur ausfüllen wenn der interne Zähler des Wechselrichters bereits einmal auf 0 zurückgesprungen ist (bekannter Firmware-Bug bei ~540 kWh). Wert in kWh eingeben der vor dem Reset bereits erzeugt wurde, z. B. '542.3'. Leer lassen wenn kein Reset stattgefunden hat.",
-          "lifetime_offset_p2": "Gleiche Eingabe wie oben, aber für Eingang 2. Leer lassen wenn kein Reset stattgefunden hat."
+          "lifetime_offset_p2": "Gleiche Eingabe wie oben, aber für Eingang 2. Leer lassen wenn kein Reset stattgefunden hat.",
+          "battery_system": "Aktivieren wenn der Wechselrichter an einem Batteriespeicher angeschlossen ist. Aktiviert häufigere Überprüfungen (alle 5 Min. statt 10 Min.) ob die Leistungsbegrenzung nach dem morgendlichen Neustart korrekt wiederhergestellt wurde."
         }
       },
       "reconfigure": {
@@ -29,11 +31,13 @@
           "port": "Port",
           "polling_interval": "Abfrageintervall (Sekunden)",
           "lifetime_offset_p1": "Lifetime-Energie Startoffset Eingang 1 (kWh)",
-          "lifetime_offset_p2": "Lifetime-Energie Startoffset Eingang 2 (kWh)"
+          "lifetime_offset_p2": "Lifetime-Energie Startoffset Eingang 2 (kWh)",
+          "battery_system": "Batterie-System (Speicher angeschlossen)"
         },
         "data_description": {
           "lifetime_offset_p1": "Aktuell gespeicherter Offset für Eingang 1. Nur ändern wenn der Wert falsch eingetragen wurde oder ein neuer Reset stattgefunden hat.",
-          "lifetime_offset_p2": "Aktuell gespeicherter Offset für Eingang 2."
+          "lifetime_offset_p2": "Aktuell gespeicherter Offset für Eingang 2.",
+          "battery_system": "Aktivieren wenn der Wechselrichter an einem Batteriespeicher angeschlossen ist."
         }
       }
     },

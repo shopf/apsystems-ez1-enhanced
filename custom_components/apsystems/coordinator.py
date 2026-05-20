@@ -20,7 +20,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_LIFETIME_OFFSET_P1, CONF_LIFETIME_OFFSET_P2, CONF_POLLING_INTERVAL, DOMAIN, LOGGER, POLLING_INTERVAL
+from .const import CONF_BATTERY_SYSTEM, CONF_LIFETIME_OFFSET_P1, CONF_LIFETIME_OFFSET_P2, CONF_POLLING_INTERVAL, DOMAIN, LOGGER, POLLING_INTERVAL
 
 STORE_VERSION = 1
 STORE_KEY = "apsystems_lifetime_offset"
@@ -215,6 +215,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # Power limit restore state after inverter restart
         self._power_limit_restored: bool = False
         self._power_limit_verify_at: float = 0.0  # monotonic timestamp, 0 = not scheduled
+        self._power_limit_verify_count: int = 0   # number of verification rounds done
 
         # Switch (on/off) restore state after inverter restart
         self._switch_restore_done: bool = False
@@ -938,6 +939,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._skip_poll_counter = 0
             self._stable_polls_after_error = 0
             self._power_limit_restored = False
+            self._power_limit_verify_count = 0
             self._switch_restore_done = False
             self._switch_restore_verify_at = 0.0
 
@@ -963,10 +965,16 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # and restore via setMaxPower (RAM only – flash is never written here).
         # Wait 3 stable polls (≈36s) before attempting to ensure the inverter is ready.
         # Give up after 5 failed attempts to avoid endless warnings.
-        # After a successful restore, verify once more after ~5 min (timestamp-based) –
-        # the EZ1 may reload flash during its morning startup sequence and undo
-        # the first restore attempt.
+        # After a successful restore, verify repeatedly until _MAX_VERIFY_ROUNDS is
+        # reached – battery systems (isBatterySystem=True) may reload flash multiple
+        # times during morning startup depending on battery charge state.
+        # Standard:  5 rounds × 10 min = up to 50 min of monitoring
+        # Battery:  10 rounds ×  5 min = up to 50 min of monitoring (more frequent)
         _MAX_RESTORE_ATTEMPTS = 5
+        _is_battery = bool(self.config_entry.data.get(CONF_BATTERY_SYSTEM, False))
+        _MAX_VERIFY_ROUNDS = 10 if _is_battery else 5
+        _VERIFY_INTERVAL = 300 if _is_battery else 600  # seconds between verify rounds
+
         self._stable_polls_after_error += 1
         _now = time.monotonic()
         _verify_due = self._power_limit_verify_at > 0 and _now >= self._power_limit_verify_at
@@ -984,17 +992,21 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                         await self.api.set_max_power(int(self.current_max_power))
                         LOGGER.info(
                             "Restored power limit to %sW (RAM) after inverter restart "
-                            "(inverter RAM was %sW).",
+                            "(inverter RAM was %sW).%s",
                             self.current_max_power, inverter_limit,
+                            " Battery system detected – extended verification active." if _is_battery else "",
                         )
-                        # Schedule a verification ~5 min later (timestamp-based, not
-                        # poll-count-based so it works correctly regardless of skip rate)
-                        self._power_limit_verify_at = time.monotonic() + 300
+                        # Schedule first verification round
+                        self._power_limit_verify_at = time.monotonic() + _VERIFY_INTERVAL
+                        self._power_limit_verify_count = 0
                     else:
                         LOGGER.debug(
                             "Power limit OK after restart: inverter RAM=%sW, stored=%sW.",
                             inverter_limit, self.current_max_power,
                         )
+                        # Still schedule verification – EZ1 may reload flash later
+                        self._power_limit_verify_at = time.monotonic() + _VERIFY_INTERVAL
+                        self._power_limit_verify_count = 0
                     self._power_limit_restored = True
                 except Exception as err:  # noqa: BLE001
                     if _restore_attempt < _MAX_RESTORE_ATTEMPTS:
@@ -1010,24 +1022,39 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                         )
                         self._power_limit_restored = True  # stop retrying this session
             elif _verify_due:
-                # Verification: check if EZ1 still has the correct limit ~5 min after restore
-                self._power_limit_verify_at = 0.0  # clear regardless of outcome
+                # Verification round: check if EZ1 still has the correct limit
+                self._power_limit_verify_count += 1
+                self._power_limit_verify_at = 0.0  # clear; may be rescheduled below
                 try:
                     inverter_limit = await self.api.get_max_power()
                     if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
                         await self.api.set_max_power(int(self.current_max_power))
                         LOGGER.info(
                             "Power limit re-applied to %sW (RAM) – EZ1 had reloaded "
-                            "flash (%sW) during morning startup.",
+                            "flash (%sW) during morning startup "
+                            "(verification round %d/%d).",
                             self.current_max_power, inverter_limit,
+                            self._power_limit_verify_count, _MAX_VERIFY_ROUNDS,
                         )
                     else:
                         LOGGER.debug(
-                            "Power limit verification OK: inverter RAM=%sW, stored=%sW.",
+                            "Power limit verification OK (round %d/%d): "
+                            "inverter RAM=%sW, stored=%sW.",
+                            self._power_limit_verify_count, _MAX_VERIFY_ROUNDS,
                             inverter_limit, self.current_max_power,
                         )
+                    # Schedule next round if budget remaining
+                    if self._power_limit_verify_count < _MAX_VERIFY_ROUNDS:
+                        self._power_limit_verify_at = time.monotonic() + _VERIFY_INTERVAL
+                    else:
+                        LOGGER.debug(
+                            "Power limit verification complete after %d rounds.",
+                            _MAX_VERIFY_ROUNDS,
+                        )
                 except Exception:  # noqa: BLE001
-                    pass  # give up silently on verification failure
+                    # Reschedule on transient error if budget remaining
+                    if self._power_limit_verify_count < _MAX_VERIFY_ROUNDS:
+                        self._power_limit_verify_at = time.monotonic() + _VERIFY_INTERVAL
 
         # Restore inverter on/off state after nightly reboot.
         # The EZ1 always starts in the ON state after a power cycle,
