@@ -38,6 +38,10 @@ _SIGNIFICANT_PRODUCTION = 0.05  # kWh – 50 Wh
 # Output data is read on every poll.
 _ALARM_POLL_INTERVAL = 10
 
+_SWITCH_RESTORE_START_POLL = 3
+_SWITCH_RESTORE_MAX_ATTEMPTS = 5
+_SWITCH_RESTORE_VERIFY_INTERVAL = 180
+
 
 def _fmt_err(err: Exception) -> str:
     """Format an exception as TypeName: message, or just TypeName if no message.
@@ -781,13 +785,12 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     alarm_info=self._fallback_data.alarm_info,
                     detail_data=self._fallback_detail,
                 )
-            self._stable_polls_after_error = 0  # reset – must re-stabilize before restore
-            # Only invalidate the restore flag after 3+ consecutive errors (~36s).
-            # Brief single-poll glitches (e.g. EZ1 morning startup jitter) should
-            # not trigger another setMaxPower write – the EZ1 may not yet be ready
-            # to accept commands and will silently discard them.
+            self._stable_polls_after_error = 0
             if self._consecutive_errors >= 3:
                 self._power_limit_restored = False
+            if self._consecutive_errors >= 2:
+                self._switch_restore_done = False
+                self._switch_restore_verify_at = 0.0
             self.inverter_reachable = False
             return self._fallback_data
 
@@ -830,10 +833,12 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     alarm_info=self._fallback_data.alarm_info,
                     detail_data=self._fallback_detail,
                 )
-            self._stable_polls_after_error = 0  # reset – must re-stabilize before restore
-            # Only invalidate restore flag after 3+ consecutive errors
+            self._stable_polls_after_error = 0
             if self._consecutive_errors >= 3:
                 self._power_limit_restored = False
+            if self._consecutive_errors >= 2:
+                self._switch_restore_done = False
+                self._switch_restore_verify_at = 0.0
             self.inverter_reachable = False
             return self._fallback_data
 
@@ -1056,15 +1061,6 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     if self._power_limit_verify_count < _MAX_VERIFY_ROUNDS:
                         self._power_limit_verify_at = time.monotonic() + _VERIFY_INTERVAL
 
-        # Restore inverter on/off state after nightly reboot.
-        # The EZ1 always starts in the ON state after a power cycle,
-        # so if the user had it turned off, we must re-apply that command.
-        # Uses the same robust retry logic as the power limit restore:
-        # - Wait 5 stable polls (≈60s) to give the inverter time to settle
-        # - Retry up to 5 times in case of morning startup glitches
-        # - Verify ~3 min later that the EZ1 actually accepted the command
-        _MAX_SWITCH_RESTORE_ATTEMPTS = 5
-        _SWITCH_RESTORE_START_POLL = 5
         if not self.inverter_switch_on:
             _now_sw = time.monotonic()
             _switch_verify_due = (
@@ -1076,54 +1072,47 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             if (
                 self._stable_polls_after_error >= _SWITCH_RESTORE_START_POLL
                 and not self._switch_restore_done
-                and _switch_restore_attempt <= _MAX_SWITCH_RESTORE_ATTEMPTS
+                and _switch_restore_attempt <= _SWITCH_RESTORE_MAX_ATTEMPTS
             ):
                 try:
-                    # Check current state before sending command
-                    await self.api.set_device_power_status(0)
-                    LOGGER.info(
-                        "Inverter switch state restored to OFF after inverter restart "
-                        "(attempt %d/%d).",
-                        _switch_restore_attempt, _MAX_SWITCH_RESTORE_ATTEMPTS,
-                    )
-                    # Schedule verification ~3 min later
-                    self._switch_restore_verify_at = time.monotonic() + 180
-                    self._switch_restore_done = True
-                except Exception as err:  # noqa: BLE001
-                    if _switch_restore_attempt < _MAX_SWITCH_RESTORE_ATTEMPTS:
-                        LOGGER.warning(
-                            "Could not restore inverter off state "
-                            "(attempt %d/%d): %s",
-                            _switch_restore_attempt, _MAX_SWITCH_RESTORE_ATTEMPTS,
-                            _fmt_err(err),
-                        )
-                    else:
-                        LOGGER.warning(
-                            "Could not restore inverter off state after %d attempts: %s. "
-                            "Please toggle the switch manually.",
-                            _MAX_SWITCH_RESTORE_ATTEMPTS, _fmt_err(err),
-                        )
-                        self._switch_restore_done = True  # stop retrying
-
-            elif _switch_verify_due:
-                # Verification: confirm EZ1 actually accepted the off command
-                self._switch_restore_verify_at = 0.0
-                try:
-                    # getOnOff: status "0" = ON, "1" = OFF
                     resp = await self.api._request("getOnOff")
-                    if resp and resp.get("data", {}).get("status") == "0":
-                        # EZ1 is ON – it ignored or reset our off command → retry
+                    already_off = resp and resp.get("data", {}).get("status") == "1"
+                    if already_off:
+                        LOGGER.debug("Switch restore: EZ1 already OFF – skipping setOnOff.")
+                    else:
                         await self.api.set_device_power_status(0)
                         LOGGER.info(
-                            "Inverter switch re-applied to OFF – EZ1 had reset to ON "
-                            "during morning startup."
+                            "Inverter switch restored to OFF after reconnect (attempt %d/%d).",
+                            _switch_restore_attempt, _SWITCH_RESTORE_MAX_ATTEMPTS,
                         )
-                        # Schedule another verification
-                        self._switch_restore_verify_at = time.monotonic() + 180
+                    self._switch_restore_verify_at = _now_sw + _SWITCH_RESTORE_VERIFY_INTERVAL
+                    self._switch_restore_done = True
+                except Exception as err:  # noqa: BLE001
+                    if _switch_restore_attempt < _SWITCH_RESTORE_MAX_ATTEMPTS:
+                        LOGGER.warning(
+                            "Could not restore inverter OFF state (attempt %d/%d): %s",
+                            _switch_restore_attempt, _SWITCH_RESTORE_MAX_ATTEMPTS, _fmt_err(err),
+                        )
                     else:
-                        LOGGER.debug("Inverter switch verification OK – EZ1 is OFF.")
+                        LOGGER.warning(
+                            "Could not restore inverter OFF state after %d attempts: %s. "
+                            "Please toggle the switch manually.",
+                            _SWITCH_RESTORE_MAX_ATTEMPTS, _fmt_err(err),
+                        )
+                        self._switch_restore_done = True
+
+            elif _switch_verify_due:
+                self._switch_restore_verify_at = 0.0
+                try:
+                    resp = await self.api._request("getOnOff")
+                    if resp and resp.get("data", {}).get("status") == "0":
+                        await self.api.set_device_power_status(0)
+                        LOGGER.info("Inverter switch re-applied to OFF – EZ1 had reset to ON.")
+                    else:
+                        LOGGER.debug("Switch verification OK – EZ1 is OFF.")
+                    self._switch_restore_verify_at = _now_sw + _SWITCH_RESTORE_VERIFY_INTERVAL
                 except Exception:  # noqa: BLE001
-                    pass  # give up silently on verification failure
+                    self._switch_restore_verify_at = _now_sw + _SWITCH_RESTORE_VERIFY_INTERVAL
 
         output_data, needs_save = self._compensate_lifetime_energy(output_data)
         if needs_save:

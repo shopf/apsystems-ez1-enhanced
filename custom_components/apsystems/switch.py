@@ -94,6 +94,11 @@ class ApSystemsInverterSwitch(
         try:
             self.coordinator._poll_active = True
             await self._api.set_device_power_status(1)
+            if (
+                self.coordinator.current_max_power is not None
+                and self.coordinator.current_max_power > 0
+            ):
+                await self._api.set_max_power(int(self.coordinator.current_max_power))
             self.coordinator.inverter_switch_on = True
             self.async_write_ha_state()
             await self.coordinator._save_state()
