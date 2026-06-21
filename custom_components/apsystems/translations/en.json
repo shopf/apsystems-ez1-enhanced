@@ -35,8 +35,8 @@
           "battery_system": "Battery system (storage connected)"
         },
         "data_description": {
-          "lifetime_offset_p1": "Currently stored offset for input 1. Only change if the value was entered incorrectly or a new reset has occurred.",
-          "lifetime_offset_p2": "Currently stored offset for input 2.",
+          "lifetime_offset_p1": "Currently stored offset for input 1. Only change if the value was entered incorrectly or a new reset has occurred. ⚠️ Negative values permanently reduce the displayed lifetime counter by this amount. Correction is possible by reconfiguring again with an adjusted value.",
+          "lifetime_offset_p2": "Currently stored offset for input 2. ⚠️ Negative values permanently reduce the displayed lifetime counter by this amount. Correction is possible by reconfiguring again with an adjusted value.",
           "battery_system": "Enable if the inverter is connected to a battery storage system."
         }
       }

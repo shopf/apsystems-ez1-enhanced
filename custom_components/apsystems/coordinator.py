@@ -28,6 +28,7 @@ STORE_KEY = "apsystems_lifetime_offset"
 # Minimum today-energy value above which a sudden drop to 0.0 is treated as a
 # firmware bug (EZ1 firmware 1.12.2 resets e1/e2 to 0 ~11 min before shutdown).
 # Below this threshold the reset is treated as a legitimate midnight reset.
+_OVERFLOW_RESET_THRESHOLD = 500.0  # kWh – real firmware overflow drops from ~540 to ~0
 _TODAY_RESET_THRESHOLD = 0.01  # kWh – values below this are treated as "near zero"
 # Minimum production seen today before a near-zero reading is treated as a firmware bug.
 # Below this, the inverter may legitimately be starting up on a cloudy morning.
@@ -478,6 +479,10 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             if abs(delta_p1) > 0.0001 or abs(delta_p2) > 0.0001:
                 self._te1_offset += delta_p1
                 self._te2_offset += delta_p2
+                if self._te1_last_out is not None:
+                    self._te1_last_out += delta_p1
+                if self._te2_last_out is not None:
+                    self._te2_last_out += delta_p2
                 LOGGER.info(
                     "Lifetime energy offset updated via reconfigure – "
                     "P1 delta: %+.5f kWh (new total offset: %.5f kWh), "
@@ -560,8 +565,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         """Compensate for two known EZ1-M lifetime energy issues:
 
         1. OVERFLOW BUG: At ~540 kWh the firmware resets te1/te2 to 0.
-           Detected when raw value drops > 1 kWh vs last raw value.
-           Offset is accumulated so HA sees a continuously increasing total.
+           Detected when raw value drops by more than _OVERFLOW_RESET_THRESHOLD
+           vs last raw value. Offset is accumulated so HA sees a continuously
+           increasing total.
 
         2. ROUNDING JITTER: Inverter occasionally returns a marginally smaller
            value due to firmware floating point rounding (e.g. 176.58319 → 176.58315).
@@ -571,9 +577,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         te1_raw = output_data.te1
         te2_raw = output_data.te2
 
-        # 1. Detect and compensate overflow reset (raw drop > 1 kWh)
+        # 1. Detect and compensate overflow reset
         needs_save = False
-        if self._te1_last_raw is not None and te1_raw < (self._te1_last_raw - 1.0):
+        if self._te1_last_raw is not None and te1_raw < (self._te1_last_raw - _OVERFLOW_RESET_THRESHOLD):
             self._te1_offset += self._te1_last_raw
             needs_save = True
             LOGGER.warning(
@@ -583,7 +589,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 self._te1_last_raw, te1_raw, self._te1_offset,
             )
 
-        if self._te2_last_raw is not None and te2_raw < (self._te2_last_raw - 1.0):
+        if self._te2_last_raw is not None and te2_raw < (self._te2_last_raw - _OVERFLOW_RESET_THRESHOLD):
             self._te2_offset += self._te2_last_raw
             needs_save = True
             LOGGER.warning(

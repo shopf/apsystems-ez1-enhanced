@@ -35,8 +35,8 @@
           "battery_system": "Batterie-System (Speicher angeschlossen)"
         },
         "data_description": {
-          "lifetime_offset_p1": "Aktuell gespeicherter Offset für Eingang 1. Nur ändern wenn der Wert falsch eingetragen wurde oder ein neuer Reset stattgefunden hat.",
-          "lifetime_offset_p2": "Aktuell gespeicherter Offset für Eingang 2.",
+          "lifetime_offset_p1": "Aktuell gespeicherter Offset für Eingang 1. Nur ändern wenn der Wert falsch eingetragen wurde oder ein neuer Reset stattgefunden hat. ⚠️ Negative Werte reduzieren den angezeigten Lifetime-Zähler dauerhaft um diesen Betrag. Korrektur ist über erneutes Reconfigure mit angepasstem Wert möglich.",
+          "lifetime_offset_p2": "Aktuell gespeicherter Offset für Eingang 2. ⚠️ Negative Werte reduzieren den angezeigten Lifetime-Zähler dauerhaft um diesen Betrag. Korrektur ist über erneutes Reconfigure mit angepasstem Wert möglich.",
           "battery_system": "Aktivieren wenn der Wechselrichter an einem Batteriespeicher angeschlossen ist."
         }
       }
