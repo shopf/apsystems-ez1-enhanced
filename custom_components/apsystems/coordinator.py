@@ -29,10 +29,11 @@ STORE_KEY = "apsystems_lifetime_offset"
 # firmware bug (EZ1 firmware 1.12.2 resets e1/e2 to 0 ~11 min before shutdown).
 # Below this threshold the reset is treated as a legitimate midnight reset.
 _OVERFLOW_RESET_THRESHOLD = 500.0  # kWh – real firmware overflow drops from ~540 to ~0
-_TODAY_RESET_THRESHOLD = 0.01  # kWh – values below this are treated as "near zero"
+_TODAY_RESET_THRESHOLD = 0.3   # kWh – EZ1 can report small non-zero values after restart
+_SIGNIFICANT_PRODUCTION = 0.5  # kWh – only protect if meaningful production seen today
 # Minimum production seen today before a near-zero reading is treated as a firmware bug.
 # Below this, the inverter may legitimately be starting up on a cloudy morning.
-_SIGNIFICANT_PRODUCTION = 0.05  # kWh – 50 Wh
+
 
 # Alarm info is read every Nth poll to reduce load on the inverter and
 # avoid WLAN reconnects on firmware 1.12.2 which reconnects frequently.
@@ -147,7 +148,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
     _e2_protected: float = 0.0  # highest e2 seen today – never decreases within a day
     _e1_reset_logged: bool = False  # prevents repeated WARNING for same reset event
     _e2_reset_logged: bool = False
-    _protected_date: date | None = None  # date when _e1/e2_protected were last updated
+    _protected_date: date | None = None  # set to today in __init__, None only before first poll
     _stable_polls_after_error: int = 0  # counts successful polls after reconnect
     _device_info_retries: int = 0  # counts remaining retries for device info
     default_max_power: int | None = None  # from /getDefaultMaxPower (flash value)
@@ -225,6 +226,10 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # Switch (on/off) restore state after inverter restart
         self._switch_restore_done: bool = False
         self._switch_restore_verify_at: float = 0.0
+
+        # Initialize protected_date to today so midnight reset fires correctly
+        # even if the inverter never delivers a successful poll before midnight
+        self._protected_date: date = dt_util.now().date()
 
         # Counts successful polls after a reconnect – used for restore timing
         self._stable_polls_after_error: int = 0
@@ -429,7 +434,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._e1_protected = float(data.get("e1_protected", 0.0))
             self._e2_protected = float(data.get("e2_protected", 0.0))
             pd = data.get("protected_date")
-            self._protected_date = date.fromisoformat(pd) if pd else None
+            self._protected_date = date.fromisoformat(pd) if pd else dt_util.now().date()
 
             # Power limit
             mp = data.get("current_max_power")
@@ -531,7 +536,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 # Today energy protection
                 "e1_protected": self._e1_protected,
                 "e2_protected": self._e2_protected,
-                "protected_date": self._protected_date.isoformat() if self._protected_date else None,
+                "protected_date": self._protected_date.isoformat(),
                 # Power limit
                 "current_max_power": self.current_max_power,
                 # Flash power limit (getDefaultMaxPower) – persisted so we can detect
@@ -684,7 +689,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         the inverter from being detected when it comes back online in the morning.
         """
         today = dt_util.now().date()
-        if self._protected_date is not None and today != self._protected_date:
+        if today != self._protected_date:
             LOGGER.info(
                 "Today energy counters reset at midnight – P1: %.5f kWh, P2: %.5f kWh.",
                 self._e1_protected, self._e2_protected,
