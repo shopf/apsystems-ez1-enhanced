@@ -35,12 +35,13 @@ class ApSystemsEntity:
         ip = self._coordinator.device_ip
         ip_display = f"IP: {ip}" if ip and ip != "unknown" else None
         version = self._coordinator.device_version
+        model = self._coordinator.detected_model
 
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._device_id)},
             name=self._device_name,
             manufacturer="APsystems",
-            model="EZ1-M",
+            model=model,
             sw_version=version if version != "unknown" else None,
             serial_number=self._device_id,
             model_id=ip_display,

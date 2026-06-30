@@ -25,3 +25,21 @@ CONF_LIFETIME_OFFSET_P2 = "lifetime_offset_p2"
 # Enables more frequent power limit verification after morning restart
 # (every 5 min × 10 rounds instead of every 10 min × 5 rounds).
 CONF_BATTERY_SYSTEM = "battery_system"
+
+# Model detection based on the hardware maximum output power (VA) reported
+# by getDeviceInfo() (field "maxPower").
+#
+# If a device reports a maxPower value that is not in this table, the
+# model cannot be determined. In that case a one-time warning is logged
+# (see ApSystemsDataCoordinator._check_known_model) asking the user to
+# open an issue with the reported value, so the table can be extended.
+MODEL_BY_MAX_POWER: dict[int, str] = {
+    600: "EZ1-M",
+    800: "EZ1-M",
+    900: "EZ1-LV",
+    960: "EZ1-H",
+    1600: "EZ1D-L",
+    1800: "EZ1D",
+    2000: "EZ1D-H",
+}
+UNKNOWN_MODEL_NAME = "EZ1 (unknown model)"

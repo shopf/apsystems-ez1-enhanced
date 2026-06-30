@@ -20,19 +20,33 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_BATTERY_SYSTEM, CONF_LIFETIME_OFFSET_P1, CONF_LIFETIME_OFFSET_P2, CONF_POLLING_INTERVAL, DOMAIN, LOGGER, POLLING_INTERVAL
+from .const import (
+    CONF_BATTERY_SYSTEM,
+    CONF_LIFETIME_OFFSET_P1,
+    CONF_LIFETIME_OFFSET_P2,
+    CONF_POLLING_INTERVAL,
+    DOMAIN,
+    LOGGER,
+    MODEL_BY_MAX_POWER,
+    POLLING_INTERVAL,
+    UNKNOWN_MODEL_NAME,
+)
 
 STORE_VERSION = 1
 STORE_KEY = "apsystems_lifetime_offset"
 
-# Minimum today-energy value above which a sudden drop to 0.0 is treated as a
-# firmware bug (EZ1 firmware 1.12.2 resets e1/e2 to 0 ~11 min before shutdown).
-# Below this threshold the reset is treated as a legitimate midnight reset.
 _OVERFLOW_RESET_THRESHOLD = 500.0  # kWh – real firmware overflow drops from ~540 to ~0
-_TODAY_RESET_THRESHOLD = 0.3   # kWh – EZ1 can report small non-zero values after restart
-_SIGNIFICANT_PRODUCTION = 0.5  # kWh – only protect if meaningful production seen today
-# Minimum production seen today before a near-zero reading is treated as a firmware bug.
-# Below this, the inverter may legitimately be starting up on a cloudy morning.
+
+# Today-energy (e1/e2) protection no longer uses a fixed "is this close enough
+# to zero" threshold (see _compensate_lifetime_energy). Field reports showed
+# the firmware bug does not reliably reset e1/e2 to exactly 0.0 – it can land
+# on an arbitrary intermediate value (observed: 0.01 kWh, ~1.1 kWh, ~0.3 kWh).
+# Since today's cumulative energy can physically never decrease except at
+# midnight (handled separately in _check_midnight_reset), any decrease is
+# now clamped to the previous highest value, regardless of its size. This
+# constant only throttles the INFO-level log message so that sub-rounding
+# jitter (like with te1/te2) does not spam the log at INFO level.
+_TODAY_DROP_LOG_EPSILON = 0.01  # kWh – drops smaller than this only log at DEBUG
 
 
 # Alarm info is read every Nth poll to reduce load on the inverter and
@@ -87,8 +101,7 @@ class ReturnOutputDataDetail:
     # Grid voltage (V) and frequency (Hz)
     gv: float | None = None
     gf: float | None = None
-    # Inverter temperature (°C) – last known value is preserved when offline
-    t: float | None = None
+    t: float | None = None  # inverter temperature, preserved when offline
 
 
 def _make_fallback_detail() -> ReturnOutputDataDetail:
@@ -249,6 +262,61 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # Only called once, only when older firmware is detected.
         self._add_flash_sensor: object = None  # set by async_setup_entry
         self._flash_sensor_registered: bool = False
+        # Set to True once an "unknown model" warning has been logged for
+        # this coordinator instance, so it is only logged once per HA run.
+        self._unknown_model_logged: bool = False
+
+    @property
+    def detected_model(self) -> str:
+        """Return the inverter model name, detected from the hardware maxPower value.
+
+        self.api.max_power holds the hardware maximum output power (VA) as
+        reported by getDeviceInfo() (field "maxPower") at startup / first
+        successful poll. This value never changes for a given physical
+        device, unlike current_max_power/default_max_power which reflect
+        the user's chosen output limit and can be lower than the hardware
+        ceiling. Using the hardware value avoids misdetecting a deliberately
+        throttled EZ1-D/EZ1-H as a smaller model.
+
+        Guard: while device_version == "unknown", get_device_info() has not
+        yet succeeded and api.max_power may still hold the *fallback* value
+        of 1800 set in _async_setup() (chosen so EZ1-D users are never
+        capped at 800W during this brief window). That fallback is not a
+        real reading and must not be treated as a confirmed EZ1D – without
+        this guard every inverter would briefly show as "EZ1D" right after
+        a HA restart, until the next successful poll confirms the real
+        model.
+        """
+        if self.device_version == "unknown":
+            return UNKNOWN_MODEL_NAME
+        hardware_max = int(self.api.max_power or 0)
+        model = MODEL_BY_MAX_POWER.get(hardware_max)
+        if model is None:
+            self._check_known_model(hardware_max)
+            return UNKNOWN_MODEL_NAME
+        return model
+
+    def _check_known_model(self, hardware_max: int) -> None:
+        """Log a one-time warning if the hardware maxPower value is unknown.
+
+        This can happen for two reasons:
+        - A new/different EZ1 model not yet listed in MODEL_BY_MAX_POWER.
+        - The value has not been fetched yet (hardware_max == 0), e.g.
+          right at startup before get_device_info() has completed. This
+          case is intentionally not warned about.
+        """
+        if hardware_max <= 0:
+            return  # not fetched yet – not an unknown model, just not ready
+        if self._unknown_model_logged:
+            return
+        LOGGER.warning(
+            "Unknown EZ1 device detected (maxPower=%sVA). This device could "
+            "not be matched to a known EZ1 model. Please open an issue at "
+            "https://github.com/shopf/apsystems-ez1-enhanced/issues "
+            "and report the value maxPower=%sVA so the model can be added.",
+            hardware_max, hardware_max,
+        )
+        self._unknown_model_logged = True
 
     async def _async_setup(self) -> None:
         """Set up coordinator.
@@ -422,7 +490,6 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         cfg_p2 = float(cfg.get(CONF_LIFETIME_OFFSET_P2, 0.0))
 
         if data:
-            # Lifetime energy overflow compensation
             self._te1_offset = float(data.get("te1_offset", 0.0))
             self._te2_offset = float(data.get("te2_offset", 0.0))
             self._te1_last_raw = data.get("te1_last_raw")
@@ -430,13 +497,11 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._te1_last_out = data.get("te1_last_out")
             self._te2_last_out = data.get("te2_last_out")
 
-            # Today energy protection
             self._e1_protected = float(data.get("e1_protected", 0.0))
             self._e2_protected = float(data.get("e2_protected", 0.0))
             pd = data.get("protected_date")
             self._protected_date = date.fromisoformat(pd) if pd else dt_util.now().date()
 
-            # Power limit
             mp = data.get("current_max_power")
             if mp is not None:
                 self.current_max_power = float(mp)
@@ -446,10 +511,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self.flash_write_count = int(data.get("flash_write_count", 0))
             if self.flash_write_count > 0:
                 self._flash_sensor_registered = False
-            # Desired inverter on/off state
             self.inverter_switch_on = bool(data.get("inverter_switch_on", True))
 
-            # Device info
             self.device_version = data.get("device_version", "unknown")
             self.device_ip = data.get("device_ip", "unknown")
 
@@ -523,39 +586,31 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         cfg = self.config_entry.data
         try:
             await self._store.async_save({
-                # Lifetime energy overflow compensation
                 "te1_offset": self._te1_offset,
                 "te2_offset": self._te2_offset,
                 "te1_last_raw": self._te1_last_raw,
                 "te2_last_raw": self._te2_last_raw,
                 "te1_last_out": self._te1_last_out,
                 "te2_last_out": self._te2_last_out,
-                # Last applied config-entry offset – used to detect reconfigure changes
+                # Used to detect reconfigure changes (delta vs. last applied offset)
                 "applied_offset_p1": float(cfg.get(CONF_LIFETIME_OFFSET_P1, 0.0)),
                 "applied_offset_p2": float(cfg.get(CONF_LIFETIME_OFFSET_P2, 0.0)),
-                # Today energy protection
                 "e1_protected": self._e1_protected,
                 "e2_protected": self._e2_protected,
                 "protected_date": self._protected_date.isoformat(),
-                # Power limit
                 "current_max_power": self.current_max_power,
-                # Flash power limit (getDefaultMaxPower) – persisted so we can detect
-                # on offline startup whether the one-time flash reset was already done.
+                # Persisted so we can detect on offline startup whether the
+                # one-time flash reset to hardware max was already done.
                 "default_max_power": self.default_max_power,
-                # Flash write counter (older firmware only)
                 "flash_write_count": self.flash_write_count,
-                # Desired inverter on/off state – restored after nightly reboot
                 "inverter_switch_on": self.inverter_switch_on,
-                # Last known sensor values (fallback data)
                 "fb_p1": fb.p1,
                 "fb_p2": fb.p2,
                 "fb_e1": fb.e1,
                 "fb_e2": fb.e2,
                 "fb_te1": fb.te1,
                 "fb_te2": fb.te2,
-                # Last known temperature (preserved across offline periods)
                 "fb_temperature": self._last_temperature,
-                # Device info
                 "device_version": self.device_version,
                 "device_ip": self.device_ip,
             })
@@ -625,55 +680,67 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         output_data.te2 = te2
 
         # 3. TODAY ENERGY PROTECTION (firmware bug on all known EZ1 versions)
-        # The inverter resets e1/e2 to exactly 0 before or during shutdown –
-        # sometimes minutes before going offline. This is NOT a midnight reset.
+        # The inverter can momentarily report e1/e2 below the true cumulative
+        # value for today – sometimes (close to) a full reset to 0, sometimes
+        # a partial drop to some arbitrary intermediate value caused by an
+        # internal recalculation. A fixed "is this near zero" threshold is
+        # fundamentally unable to catch all cases (field reports showed drops
+        # to 0.01 kWh, ~50% of the daily total, and values landing just above
+        # whatever threshold was configured).
         #
-        # Strategy:
-        # - _e1_protected tracks the HIGHEST e1 seen today (never decreases intraday)
-        # - On midnight (new calendar date): _e1_protected resets to 0
-        # - If e1==0 and _e1_protected > threshold: firmware bug → hold protected value
-        # - If e1==0 and new day: legitimate reset → accept 0, start fresh
+        # Today's cumulative energy can physically never decrease within the
+        # same day – the only legitimate reset is exactly at midnight, which
+        # is handled separately in _check_midnight_reset(). We therefore use
+        # the same monotonic-floor strategy already used above for te1/te2:
+        # any decrease, however small or large, is clamped to the previous
+        # highest value seen today.
         e1_raw = output_data.e1
         e2_raw = output_data.e2
         today = dt_util.now().date()
 
         # Midnight reset is handled in _async_update_data – see _check_midnight_reset()
 
-        # Track highest value seen today – never allow decrease within same day
-        if e1_raw > self._e1_protected:
-            self._e1_protected = e1_raw
-            self._protected_date = today
-            self._e1_reset_logged = False  # new higher value → reset logged flag
-        if e2_raw > self._e2_protected:
-            self._e2_protected = e2_raw
-            self._protected_date = today
-            self._e2_reset_logged = False
-
-        # Detect firmware bug: e1/e2 near zero but significant production already seen today.
-        # Uses _SIGNIFICANT_PRODUCTION to avoid false positives on cloudy mornings.
-        if e1_raw < _TODAY_RESET_THRESHOLD and self._e1_protected > _SIGNIFICANT_PRODUCTION:
-            if not self._e1_reset_logged:
+        if e1_raw < self._e1_protected:
+            drop = self._e1_protected - e1_raw
+            if not self._e1_reset_logged and drop > _TODAY_DROP_LOG_EPSILON:
                 LOGGER.info(
-                    "APsystems EZ1 today energy (e1) reset to 0 while last known value "
-                    "was %.5f kWh – firmware bug detected. Holding last value until midnight.",
-                    self._e1_protected,
+                    "APsystems EZ1 today energy (e1) dropped to %.5f kWh while last "
+                    "known value was %.5f kWh – firmware bug detected. Holding last "
+                    "value until it catches up or midnight resets it.",
+                    e1_raw, self._e1_protected,
                 )
                 self._e1_reset_logged = True
             else:
-                LOGGER.debug("e1 still 0 – holding protected value %.5f kWh.", self._e1_protected)
+                LOGGER.debug(
+                    "e1 below protected value (%.5f < %.5f) – holding protected value.",
+                    e1_raw, self._e1_protected,
+                )
             output_data.e1 = self._e1_protected
+        else:
+            self._e1_protected = e1_raw
+            self._protected_date = today
+            self._e1_reset_logged = False  # new high reached – future drops will log again
 
-        if e2_raw < _TODAY_RESET_THRESHOLD and self._e2_protected > _SIGNIFICANT_PRODUCTION:
-            if not self._e2_reset_logged:
+        if e2_raw < self._e2_protected:
+            drop = self._e2_protected - e2_raw
+            if not self._e2_reset_logged and drop > _TODAY_DROP_LOG_EPSILON:
                 LOGGER.info(
-                    "APsystems EZ1 today energy (e2) reset to 0 while last known value "
-                    "was %.5f kWh – firmware bug detected. Holding last value until midnight.",
-                    self._e2_protected,
+                    "APsystems EZ1 today energy (e2) dropped to %.5f kWh while last "
+                    "known value was %.5f kWh – firmware bug detected. Holding last "
+                    "value until it catches up or midnight resets it.",
+                    e2_raw, self._e2_protected,
                 )
                 self._e2_reset_logged = True
             else:
-                LOGGER.debug("e2 still 0 – holding protected value %.5f kWh.", self._e2_protected)
+                LOGGER.debug(
+                    "e2 below protected value (%.5f < %.5f) – holding protected value.",
+                    e2_raw, self._e2_protected,
+                )
             output_data.e2 = self._e2_protected
+        else:
+            self._e2_protected = e2_raw
+            self._protected_date = today
+            self._e2_reset_logged = False
 
         return output_data, needs_save
 

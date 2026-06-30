@@ -1,3 +1,5 @@
+# 🇩🇪 Deutsch
+
 # APsystems EZ1 – Community Enhanced Integration
 
 [![HACS Custom Repository](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz)
@@ -104,6 +106,12 @@ Ohne diesen Fix würde der Reset die HA-Statistikdatenbank für `TOTAL_INCREASIN
 
 ---
 
+### 🐛 Fix: „Heutige Erzeugung" Sensoren springen tagsüber zurück
+**Betroffene Versionen:** Alle, besonders auffällig bei Speichersystemen (z.B. EZ1 hinter Marstek B2500) mit geringer, kontinuierlicher Leistung
+**Details:** Nach einem Neustart des Wechselrichters oder einem Firmware-Bug kann `e1`/`e2` (heutige Erzeugung pro Eingang) zwischendurch auf einen falschen, zu niedrigen Wert zurücksetzen – nicht zuverlässig auf exakt 0, sondern auf einen beliebigen Zwischenwert (in der Praxis beobachtet: 0,01 kWh).
+
+---
+
 ## Neue Features gegenüber der offiziellen Integration
 
 ### ✨ Acht neue Sensoren
@@ -124,6 +132,12 @@ Alle Entitätsnamen sind auf Deutsch verfügbar.
 
 ### ✨ EZ1-D Unterstützung
 Der EZ1-D (bis 1800W) wird unterstützt. Die Leistungsgrenze wird dynamisch vom Gerät gelesen – der 800W Fallback gilt nur wenn `getDeviceInfo()` keinen Wert liefert.
+
+### ✨ Automatische Modellerkennung
+Das Gerätemodell (EZ1-M, EZ1-LV, EZ1-H, EZ1D-L, EZ1D, EZ1D-H) wird automatisch anhand der vom Gerät gemeldeten maximalen Leistung (`maxPower`) erkannt und im Gerätenamen angezeigt – kein manuelles Eintragen mehr nötig. Unbekannte Modelle werden einmalig geloggt mit der Bitte, ein Issue mit dem `maxPower`-Wert zu eröffnen, damit das Modell ergänzt werden kann.
+
+### ✨ Lifetime-Energie-Offsets
+Im Reconfigure-Dialog kann der Lifetime-Energie-Offset pro Eingang eingetragen werden und jederzeit nachträglich korrigiert werden – etwa wenn ein falscher Wert eingetragen wurde. Negative Werte reduzieren den angezeigten Zähler dauerhaft; ein entsprechender Warnhinweis wird im Formular angezeigt.
 
 ---
 
@@ -175,8 +189,6 @@ Der EZ1-D (bis 1800W) wird unterstützt. Die Leistungsgrenze wird dynamisch vom 
    `<config>/custom_components/apsystems/`
 3. Home Assistant neu starten
 4. **Einstellungen → Geräte & Dienste → Integration hinzufügen** → „APsystems" suchen
-
-> **Hinweis:** Falls die offizielle APsystems Integration bereits installiert ist, muss diese zuerst entfernt werden – beide verwenden denselben Domain-Namen `apsystems`.
 
 ---
 
@@ -241,7 +253,10 @@ APsystems veröffentlicht keine öffentliche Firmware-Datenbank. Updates sind au
 | EZ1-M | 1.12.2 | ✅ Getestet – Sicherheitslücke geschlossen, empfohlen |
 | EZ1-M | 1.1.2_b | ✅ Behoben (war kaputt in offizieller) |
 | EZ1-M | 2.0.1_B | ✅ Behoben (war kaputt in offizieller) |
+| EZ1-LV | – | ✅ Unterstützt (automatische Modellerkennung) |
+| EZ1-H | – | ✅ Unterstützt (automatische Modellerkennung) |
 | EZ1-D | – | ✅ Unterstützt (maxPower dynamisch) |
+| EZ1D-L / EZ1D-H | – | ✅ Unterstützt (automatische Modellerkennung) |
 
 ---
 
@@ -295,3 +310,317 @@ Diese Integration ist nicht mit APsystems oder Sonnenladen GmbH verbunden. Ziel 
 ## Lizenz
 
 MIT License – siehe [LICENSE](LICENSE)
+---
+
+# 🇬🇧 English
+
+# APsystems EZ1 – Community Enhanced Integration
+
+[![HACS Custom Repository](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz)
+[![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.6%2B-blue.svg)](https://www.home-assistant.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+A community-maintained, improved version of the official [APsystems Home Assistant Integration](https://www.home-assistant.io/integrations/apsystems/).
+
+This integration fixes several bugs in the official integration, improves firmware compatibility, and adds useful enhancements and sensors. Communication happens exclusively over the **local network** – no cloud required.
+
+---
+
+## ⚠️ Security Notice – Firmware 1.12.2
+
+On March 4, 2026, Jakkaru GmbH disclosed a critical security vulnerability in the EZ1-M. Attackers could push arbitrary firmware onto the inverter via the APsystems MQTT cloud server – without physical access. Roughly 100,000 devices worldwide are affected.
+
+**Firmware 1.12.2 closes this gap – an update is strongly recommended.**
+
+Users running in Local Mode are less exposed since there is no active cloud connection, but an update is still recommended.
+
+More information: [jakkaru.de](https://jakkaru.de/de/artikel/apsystems-remote-firmware-injection)
+
+---
+
+## Why this integration?
+
+The official APsystems integration was introduced with HA 2024.6 and has barely been developed since. Several known bugs remain unfixed, and newer firmware versions break the integration entirely. This repository offers a stable, community-maintained alternative.
+
+All fixes are documented with references to the respective GitHub issues and can be submitted as PRs to the official repository.
+
+---
+
+## Normal Inverter Behavior
+
+The EZ1-M **physically shuts down completely** once the PV input voltage drops below the minimum threshold – typically at dusk or under heavy cloud cover. This means: the inverter is not in standby, it is completely powerless and disappears from the network entirely.
+
+**This is normal, expected behavior.** This integration handles it correctly:
+
+- On shutdown, the inverter returns API errors → cached data is served, all sensors retain their last values
+- After fully powering off, the inverter is no longer reachable on the network → cache stays active
+- `Inverter Active` switches to `Off` as soon as the inverter is no longer reachable
+- In the morning the inverter starts up, connects to WiFi, and the integration automatically resumes normal operation
+
+No user intervention required.
+
+---
+
+## Bugs Fixed Compared to the Official Integration
+
+### 🐛 Fix: Python 3 syntax error in exception handling
+**Affected files:** `coordinator.py`, `number.py`
+**Details:** The original integration uses Python 2 syntax:
+```python
+except ConnectionError, TimeoutError:   # SyntaxError in Python 3!
+except TimeoutError, ClientConnectorError:  # SyntaxError in Python 3!
+```
+This causes a `SyntaxError` during setup instead of a clean error.
+
+---
+
+### 🐛 Fix: `KeyError` on newer firmware versions
+**Affected firmware:** `1.1.2_b`, `2.0.1_B` and newer
+**HA Issue:** [#136288](https://github.com/home-assistant/core/issues/136288)
+**Details:** APsystems removed the `maxPower` and `minPower` fields from the `getDeviceInfo` API response in newer firmware versions. Direct access via `device_info.maxPower` caused a `KeyError` that crashed the integration entirely on startup. Fixed using `getattr()` with safe fallback values.
+
+---
+
+### 🐛 Fix: All sensors become `unknown` at night
+**Affected versions:** All
+**HA Issue:** [#140891](https://github.com/home-assistant/core/issues/140891)
+**Details:** The inverter returns an error during nightly shutdown. The official integration immediately propagates this as `UpdateFailed`, making all entities `unavailable`. Fixed with a caching mechanism: on errors, the last known values are served. Sensors remain stable until the next morning.
+
+---
+
+### 🐛 Fix: `output_fault_status` falsely reports a problem every evening
+**Affected versions:** All
+**Details:** `not c.operating` with `device_class=PROBLEM` triggers a problem warning every evening during normal shutdown. Replaced with `inverter_active` using `device_class=RUNNING` – semantically correct: `Running` / `Off`.
+
+---
+
+### 🐛 Fix: `Inverter Active` stayed `Running` at night
+**Details:** The status was read from the cache even though the inverter was physically powered off. Fixed with an `inverter_reachable` flag: `Inverter Active` shows `Off` as soon as the inverter is no longer reachable.
+
+---
+
+### 🐛 Fix: `Power Limit` always shows 800W
+**Affected versions:** All
+**Details:** The official integration reads `maxPower` from `getDeviceInfo()`, which returns no value on many firmware versions. Fixed by directly calling the dedicated `getMaxPower` endpoint. If this fails at startup, it is automatically retried on the next successful poll.
+
+---
+
+### 🐛 Fix: EZ1-M lifetime energy counter overflow (firmware bug workaround)
+**Affected versions:** All EZ1-M devices
+**Details:** A known firmware bug resets the internal lifetime energy counter (`te1`/`te2`) to 0 at around **540 kWh** (integer overflow). This is an inverter firmware issue – HA cannot prevent it.
+
+This integration **automatically detects the reset** and compensates with an accumulated offset. The HA sensors continue seamlessly without interruption or data loss. A `WARNING` is logged with the exact values before and after the reset.
+
+Without this fix, the reset would corrupt the HA statistics database for `TOTAL_INCREASING` sensors (Energy Dashboard).
+
+---
+
+### 🐛 Fix: `state is not strictly increasing` warnings
+**Details:** The inverter occasionally returns marginally smaller lifetime values due to floating-point rounding (e.g. `176.58319` → `176.58315`). This triggers HA warnings for `TOTAL_INCREASING` sensors. Fixed by tracking the last output value – the sensor value can never decrease below the previous one.
+
+---
+
+### 🐛 Fix: "Today's Production" sensors jump backward during the day
+**Affected versions:** All, especially noticeable on battery-backed systems (e.g. EZ1 behind a Marstek B2500) with low, continuous output
+**Details:** After an inverter restart or a firmware bug can reset `e1`/`e2` (today's production per input) to an incorrect, lower value mid-day – not reliably to exactly `0.0`, but to an arbitrary intermediate value (observed in the field: `0.01 kWh`).
+
+---
+
+## New Features Compared to the Official Integration
+
+### ✨ Eight new sensors
+DC voltage and DC current per PV input, inverter temperature, grid frequency and grid voltage available as diagnostic sensors.
+The firmware version (`devVer`) is also visible as a diagnostic sensor – useful for correlating issues with specific firmware versions.
+
+### ✨ Freely chosen device name
+A custom device name can be assigned during setup (e.g. "Balcony Power Plant South"). This is used as the device name in HA and as a prefix for all entity names.
+
+### ✨ Dynamic polling interval
+The polling interval can be configured between 12–60 seconds during setup.
+
+### ✨ Comprehensive logging
+All relevant events are logged with sensible log levels. Visible under **Settings → System → Logs**, filter by `apsystems`.
+
+### ✨ German translations
+All entity names are available in German.
+
+### ✨ EZ1-D support
+The EZ1-D (up to 1800W) is supported. The power limit is read dynamically from the device – the 800W fallback only applies when `getDeviceInfo()` returns no value.
+
+### ✨ Automatic model detection
+The device model (EZ1-M, EZ1-LV, EZ1-H, EZ1D-L, EZ1D, EZ1D-H) is automatically detected based on the maximum power (`maxPower`) reported by the device, and shown in the device name – no manual entry needed. Unknown models are logged once, asking the user to open an issue with the `maxPower` value so the model can be added.
+
+### ✨ Lifetime energy offsets
+The lifetime energy offset per input can be entered in the Reconfigure dialog and corrected afterwards at any time – for example if an incorrect value was entered. Negative values permanently reduce the displayed counter; a corresponding warning is shown in the form.
+
+---
+
+## Available Entities
+
+| Entity | Description | Unit |
+|---------|-------------|---------|
+| `sensor.{name}_gesamtleistung` | Total power (combined) | W |
+| `sensor.{name}_leistung_eingang_1` | Power PV input 1 | W |
+| `sensor.{name}_leistung_eingang_2` | Power PV input 2 | W |
+| `sensor.{name}_energie_heute` | Energy today (combined) | kWh |
+| `sensor.{name}_energie_heute_eingang_1` | Energy today – input 1 | kWh |
+| `sensor.{name}_energie_heute_eingang_2` | Energy today – input 2 | kWh |
+| `sensor.{name}_energie_gesamt` | Total energy (combined) | kWh |
+| `sensor.{name}_energie_gesamt_eingang_1` | Total energy – input 1 | kWh |
+| `sensor.{name}_energie_gesamt_eingang_2` | Total energy – input 2 | kWh |
+| `sensor.{name}_dc_spannung_p1` | DC voltage PV input 1 (diagnostic) | V |
+| `sensor.{name}_dc_spannung_p2` | DC voltage PV input 2 (diagnostic) | V |
+| `sensor.{name}_dc_strom_p1` | DC current PV input 1 (diagnostic) | A |
+| `sensor.{name}_dc_strom_p2` | DC current PV input 2 (diagnostic) | A |
+| `sensor.{name}_wechselrichter_temperatur` | Inverter temperature (diagnostic) | °C |
+| `sensor.{name}_netzfrequenz` | Grid frequency (diagnostic) | Hz |
+| `sensor.{name}_netzspannung` | Grid voltage (diagnostic) | V |
+| `binary_sensor.{name}_netzausfall` | Grid outage alarm (diagnostic) | – |
+| `binary_sensor.{name}_kurzschluss_eingang_1` | Short circuit input 1 (diagnostic) | – |
+| `binary_sensor.{name}_kurzschluss_eingang_2` | Short circuit input 2 (diagnostic) | – |
+| `sensor.{name}_firmware_version` | Firmware version (diagnostic) | – |
+| `binary_sensor.{name}_wechselrichter_aktiv` | Running / Off (diagnostic) | – |
+| `number.{name}_leistungsbegrenzung` | Maximum output power (30–800W / 30–1800W on EZ1-D) | W |
+| `switch.{name}_wechselrichter` | Inverter on/off | – |
+
+---
+
+## Installation
+
+### Via HACS (recommended)
+
+1. Open HACS in Home Assistant
+2. Select **Integrations**
+3. Three-dot menu → **Custom repositories**
+4. Add repository URL, category: **Integration**
+5. Search for "APsystems" and install
+6. Restart Home Assistant
+
+### Manual
+
+1. Download the current release ZIP
+2. Copy the `custom_components/apsystems` folder into your HA config directory:
+   `<config>/custom_components/apsystems/`
+3. Restart Home Assistant
+4. **Settings → Devices & Services → Add Integration** → search for "APsystems"
+
+---
+
+## Migration from the Official Integration
+
+This integration automatically replaces the official HA APsystems integration – manually deleting the official integration is **not necessary**.
+
+**It's this simple:**
+
+1. Create a backup (**Settings → System → Backups**)
+2. Add this integration via HACS as a custom repository and install it
+3. Restart Home Assistant
+4. Set up the integration via the UI (IP address, port, device name)
+
+HA automatically detects that both integrations use the same domain name `apsystems` and shows ours as the replacement. **Entity IDs, history, and statistics are fully preserved** since the `unique_id` is based on the inverter's serial number.
+
+> ℹ️ Migration from the **Sonnenladen Community Integration** (`apsystemsapi_local`) is unfortunately not seamless since it uses a different domain name. In this case, statistics are lost – an automatic migration path is planned for a future version.
+
+---
+
+## Firmware Updates
+
+APsystems does not publish a public firmware database. Updates are only available via the AP EasyPower app. As of version 1.9.2, updates are also offered in Local Mode.
+
+**Recommendation:** Before any update, check community forums for experience reports:
+- [photovoltaikforum.com](https://www.photovoltaikforum.com) – German community, very active on EZ1 firmware topics
+- [Home Assistant Community](https://community.home-assistant.io)
+
+**Known issues:**
+- Firmware `1.9.2` is known to cause problems – including incorrect lifetime energy calculation
+- After some updates, version `1.0.0` is shown and further updates are no longer possible
+- A downgrade is not officially supported and very cumbersome
+
+**Firmware `1.12.2`** closes a critical security vulnerability (remote firmware injection) – an update is strongly recommended. See security notice above.
+
+---
+
+## Requirements
+
+- Home Assistant 2024.6 or newer
+- APsystems EZ1-M or EZ1-D with Local Mode enabled
+- `apsystems-ez1==2.7.0` (installed automatically)
+
+### Enabling Local Mode
+
+1. Connect to the inverter via the AP EasyPower app using "Direct Connection"
+2. **Settings → Local Mode**
+3. Enable Local Mode and set it to "Continuous"
+4. Note the displayed IP address – setting a static IP in your router is recommended
+
+---
+
+## Compatibility
+
+| Model | Firmware | Status |
+|--------|----------|--------|
+| EZ1-M | 1.6.x | ✅ Should work |
+| EZ1-M | 1.7.0 | ✅ Tested |
+| EZ1-M | 1.7.5 | ✅ Tested |
+| EZ1-M | 1.9.0 | ⚠️ Lifetime values incorrect (firmware bug) – workaround active |
+| EZ1-M | 1.10.2 | ✅ Tested – firmware bug fixed |
+| EZ1-M | 1.12.2 | ✅ Tested – security vulnerability closed, recommended |
+| EZ1-M | 1.1.2_b | ✅ Fixed (was broken in official integration) |
+| EZ1-M | 2.0.1_B | ✅ Fixed (was broken in official integration) |
+| EZ1-LV | – | ✅ Supported (automatic model detection) |
+| EZ1-H | – | ✅ Supported (automatic model detection) |
+| EZ1-D | – | ✅ Supported (dynamic maxPower) |
+| EZ1D-L / EZ1D-H | – | ✅ Supported (automatic model detection) |
+
+---
+
+## Troubleshooting
+
+### Viewing more than 24 hours of activity
+
+The "Activity" window in the device overview shows only the last 24 hours by default. For longer periods:
+
+- **System log** – Settings → System → Logs, filter by `apsystems`. All log entries without time limit.
+- **Entity history** – Click on a single entity → "History" tab. Shows the state history over multiple days.
+- **Dashboard card** – Add an "Activity" card to a dashboard and filter by the desired entities. Time range freely selectable.
+
+### Integration shows "Setup error"
+
+If the inverter is physically powered off when HA starts (e.g. at night), the integration may fail on the first setup attempt. HA automatically retries in the background. As soon as the inverter powers up in the morning, the integration becomes available automatically.
+
+### Reporting an issue
+
+When reporting a bug, please include:
+- Firmware version (visible as the `Firmware Version` diagnostic sensor)
+- HA log from **Settings → System → Logs**, filtered by `apsystems`
+- Description of what was expected and what happened instead
+
+---
+
+## Known Inverter Bugs & Workarounds
+
+### Lifetime energy counter reset at ~540 kWh
+Confirmed firmware bug in the EZ1-M. The internal counter overflows at approximately 540 kWh and resets to 0. APsystems has confirmed the bug; a fix is announced for future firmware versions.
+
+**This integration automatically detects and compensates for the reset** – no user intervention required.
+
+---
+
+## Relationship to the Official Integration
+
+This integration is not affiliated with APsystems or Sonnenladen GmbH. The goal is to eventually contribute these fixes as pull requests to the official HA integration. This repository serves as a staging ground until then.
+
+---
+
+## Community & Support
+
+| | |
+|---|---|
+| 💬 **Questions & Ideas** | [GitHub Discussions](https://github.com/shopf/apsystems-ez1-enhanced/discussions) |
+| 🐛 **Bug Reports** | [GitHub Issues](https://github.com/shopf/apsystems-ez1-enhanced/issues) |
+
+---
+
+## License
+
+MIT License – see [LICENSE](LICENSE)
