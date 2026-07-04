@@ -15,6 +15,7 @@ from APsystemsEZ1 import (
 )
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_IP_ADDRESS
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -47,6 +48,11 @@ _OVERFLOW_RESET_THRESHOLD = 500.0  # kWh – real firmware overflow drops from ~
 # constant only throttles the INFO-level log message so that sub-rounding
 # jitter (like with te1/te2) does not spam the log at INFO level.
 _TODAY_DROP_LOG_EPSILON = 0.01  # kWh – drops smaller than this only log at DEBUG
+
+# Maximum difference allowed between e1_raw and te1_delta (te1_now - te1_at_midnight)
+# before a post-midnight carry-over is assumed. Covers minor measurement-timing
+# differences between the firmware's daily and lifetime counters.
+_TODAY_TE_DELTA_TOLERANCE = 0.02  # kWh
 
 
 # Alarm info is read every Nth poll to reduce load on the inverter and
@@ -162,9 +168,21 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
     _e1_reset_logged: bool = False  # prevents repeated WARNING for same reset event
     _e2_reset_logged: bool = False
     _protected_date: date | None = None  # set to today in __init__, None only before first poll
+    # Lifetime energy at the start of the current day (set at each midnight reset).
+    # Used to derive true today production independently of the firmware's daily
+    # counter (e1/e2), which may carry over from the previous day without resetting.
+    _te1_day_start: float | None = None
+    _te2_day_start: float | None = None
     _stable_polls_after_error: int = 0  # counts successful polls after reconnect
     _device_info_retries: int = 0  # counts remaining retries for device info
     default_max_power: int | None = None  # from /getDefaultMaxPower (flash value)
+
+    # Log throttle counters – reset at midnight or when condition clears.
+    # Prevents per-poll DEBUG spam during multi-hour firmware-bug windows.
+    _e1_carryover_count: int = 0  # increments each poll while carry-over active
+    _e2_carryover_count: int = 0
+    _e1_hold_count: int = 0       # increments each poll while monotonic hold active
+    _e2_hold_count: int = 0
 
     # Device IP address shown in device info
     device_ip: str = "unknown"
@@ -267,6 +285,16 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         self._unknown_model_logged: bool = False
 
     @property
+    def _log_id(self) -> str:
+        """Short identifier for log messages – configured IP, always available.
+
+        Uses the IP entered in the config flow (present from the very first log
+        message, before any successful API poll).  Falls back to the IP reported
+        by the inverter once that is known.
+        """
+        return self.config_entry.data.get(CONF_IP_ADDRESS, self.device_ip)
+
+    @property
     def detected_model(self) -> str:
         """Return the inverter model name, detected from the hardware maxPower value.
 
@@ -310,11 +338,10 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         if self._unknown_model_logged:
             return
         LOGGER.warning(
-            "Unknown EZ1 device detected (maxPower=%sVA). This device could "
-            "not be matched to a known EZ1 model. Please open an issue at "
+            "[%s] Unknown EZ1 device (maxPower=%sVA). Please open an issue at "
             "https://github.com/shopf/apsystems-ez1-enhanced/issues "
-            "and report the value maxPower=%sVA so the model can be added.",
-            hardware_max, hardware_max,
+            "and report maxPower=%sVA so the model can be added.",
+            self._log_id, hardware_max, hardware_max,
         )
         self._unknown_model_logged = True
 
@@ -336,16 +363,16 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self.battery_system = getattr(device_info, "isBatterySystem", False)
             self.device_ip = getattr(device_info, "ipAddr", "unknown")
             LOGGER.info(
-                "APsystems inverter connected – firmware: %s, IP: %s, battery system: %s",
+                "[%s] Inverter connected – firmware: %s, battery system: %s",
+                self._log_id,
                 self.device_version,
-                self.device_ip,
                 self.battery_system,
             )
             await self._fetch_max_power()
         except Exception as err:  # noqa: BLE001
-            LOGGER.info(
-                "APsystems inverter not reachable during setup – using fallback values. "
-                "Will retry on next poll. Error: %s", _fmt_err(err)
+            LOGGER.debug(
+                "[%s] Inverter not reachable during setup – using fallback values. "
+                "Will retry on next poll. Error: %s", self._log_id, _fmt_err(err)
             )
             # Use hardware maximum as fallback for api.max_power so the number
             # entity's upper limit is not incorrectly capped at current_max_power.
@@ -398,18 +425,18 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             return
         try:
             await self.api._request(f"setDefaultMaxPower?p={hardware_max}")
-            LOGGER.info(
-                "Flash power limit reset to hardware maximum %sW "
+            LOGGER.debug(
+                "[%s] Flash power limit reset to hardware maximum %sW "
                 "(was %sW). Flash will not be written again.",
-                hardware_max, self.default_max_power,
+                self._log_id, hardware_max, self.default_max_power,
             )
             self.default_max_power = hardware_max
             await self._save_state()  # persist so restart knows reset is done
         except Exception as err:  # noqa: BLE001
             LOGGER.warning(
-                "Could not reset flash power limit to %sW: %s. "
+                "[%s] Could not reset flash power limit to %sW: %s. "
                 "Will retry on next startup. RAM-only restore will still work correctly.",
-                hardware_max, _fmt_err(err),
+                self._log_id, hardware_max, _fmt_err(err),
             )
             # Do NOT update default_max_power – keeps retry condition True
 
@@ -440,9 +467,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                         self.current_max_power = float(self.default_max_power)
                 except Exception:  # noqa: BLE001
                     self.current_max_power = float(self.default_max_power)
-                LOGGER.info(
-                    "Power limit – RAM (current): %sW, flash (default): %sW",
-                    self.current_max_power, self.default_max_power,
+                LOGGER.debug(
+                    "[%s] Power limit – RAM (current): %sW, flash (default): %sW",
+                    self._log_id, self.current_max_power, self.default_max_power,
                 )
                 # One-time: reset flash to hardware max so RAM is the only
                 # value we ever change going forward.
@@ -457,18 +484,20 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             if result is not None:
                 self.current_max_power = float(result)
                 LOGGER.debug(
-                    "Power limit fetched (getMaxPower, flash-backed): %sW",
-                    self.current_max_power,
+                    "[%s] Power limit fetched (getMaxPower, flash-backed): %sW",
+                    self._log_id, self.current_max_power,
                 )
             else:
                 LOGGER.warning(
-                    "APsystems inverter returned no value for max power limit. "
-                    "The power limit entity may not be available."
+                    "[%s] Inverter returned no value for max power limit. "
+                    "The power limit entity may not be available.",
+                    self._log_id,
                 )
         except Exception as err:  # noqa: BLE001
             LOGGER.warning(
-                "Could not fetch max power limit from inverter: %s. "
-                "The power limit entity may not be available.", _fmt_err(err)
+                "[%s] Could not fetch max power limit from inverter: %s. "
+                "The power limit entity may not be available.",
+                self._log_id, _fmt_err(err),
             )
 
     async def _load_offsets(self) -> None:
@@ -501,6 +530,15 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._e2_protected = float(data.get("e2_protected", 0.0))
             pd = data.get("protected_date")
             self._protected_date = date.fromisoformat(pd) if pd else dt_util.now().date()
+
+            # Restore day-start lifetime anchors for post-midnight carry-over detection.
+            # Only restore if protected_date matches today – if it's a new day, the
+            # midnight reset will set fresh anchors on the next poll.
+            if self._protected_date == dt_util.now().date():
+                te1ds = data.get("te1_day_start")
+                te2ds = data.get("te2_day_start")
+                self._te1_day_start = float(te1ds) if te1ds is not None else None
+                self._te2_day_start = float(te2ds) if te2ds is not None else None
 
             mp = data.get("current_max_power")
             if mp is not None:
@@ -552,20 +590,23 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 if self._te2_last_out is not None:
                     self._te2_last_out += delta_p2
                 LOGGER.info(
-                    "Lifetime energy offset updated via reconfigure – "
-                    "P1 delta: %+.5f kWh (new total offset: %.5f kWh), "
-                    "P2 delta: %+.5f kWh (new total offset: %.5f kWh)",
+                    "[%s] Lifetime energy offset updated via reconfigure – "
+                    "P1 delta: %+.5f kWh (new total: %.5f kWh), "
+                    "P2 delta: %+.5f kWh (new total: %.5f kWh)",
+                    self._log_id,
                     delta_p1, self._te1_offset,
                     delta_p2, self._te2_offset,
                 )
 
-            LOGGER.info(
-                "Restored state from storage – "
+            LOGGER.debug(
+                "[%s] Restored state from storage – "
                 "te1_out=%.5f kWh, te2_out=%.5f kWh, "
                 "e1_protected=%.5f kWh, e2_protected=%.5f kWh, "
-                "max_power=%s W, firmware=%s",
+                "te1_day_start=%s kWh, max_power=%s W, firmware=%s",
+                self._log_id,
                 self._te1_last_out or 0.0, self._te2_last_out or 0.0,
                 self._e1_protected, self._e2_protected,
+                f"{self._te1_day_start:.5f}" if self._te1_day_start is not None else "not set",
                 self.current_max_power, self.device_version,
             )
         else:
@@ -574,10 +615,10 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             if cfg_p1 or cfg_p2:
                 self._te1_offset = cfg_p1
                 self._te2_offset = cfg_p2
-                LOGGER.info(
-                    "Applied initial lifetime energy offset from setup – "
+                LOGGER.debug(
+                    "[%s] Applied initial lifetime energy offset from setup – "
                     "P1: %.5f kWh, P2: %.5f kWh",
-                    cfg_p1, cfg_p2,
+                    self._log_id, cfg_p1, cfg_p2,
                 )
 
     async def _save_state(self) -> None:
@@ -598,6 +639,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 "e1_protected": self._e1_protected,
                 "e2_protected": self._e2_protected,
                 "protected_date": self._protected_date.isoformat(),
+                "te1_day_start": self._te1_day_start,
+                "te2_day_start": self._te2_day_start,
                 "current_max_power": self.current_max_power,
                 # Persisted so we can detect on offline startup whether the
                 # one-time flash reset to hardware max was already done.
@@ -616,9 +659,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             })
         except Exception as err:  # noqa: BLE001
             LOGGER.warning(
-                "Could not persist coordinator state to storage: %s. "
+                "[%s] Could not persist coordinator state to storage: %s. "
                 "Sensor history and power limit may not survive a restart.",
-                _fmt_err(err),
+                self._log_id, _fmt_err(err),
             )
 
     def _compensate_lifetime_energy(self, output_data: ReturnOutputData) -> tuple[ReturnOutputData, bool]:
@@ -643,20 +686,20 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._te1_offset += self._te1_last_raw
             needs_save = True
             LOGGER.warning(
-                "APsystems EZ1 lifetime energy counter reset detected on Input 1! "
-                "Previous: %.5f kWh -> New: %.5f kWh. "
+                "[%s] Lifetime energy counter reset on Input 1! "
+                "Previous: %.5f kWh → New: %.5f kWh. "
                 "Accumulated offset: %.5f kWh. HA counter continues correctly.",
-                self._te1_last_raw, te1_raw, self._te1_offset,
+                self._log_id, self._te1_last_raw, te1_raw, self._te1_offset,
             )
 
         if self._te2_last_raw is not None and te2_raw < (self._te2_last_raw - _OVERFLOW_RESET_THRESHOLD):
             self._te2_offset += self._te2_last_raw
             needs_save = True
             LOGGER.warning(
-                "APsystems EZ1 lifetime energy counter reset detected on Input 2! "
-                "Previous: %.5f kWh -> New: %.5f kWh. "
+                "[%s] Lifetime energy counter reset on Input 2! "
+                "Previous: %.5f kWh → New: %.5f kWh. "
                 "Accumulated offset: %.5f kWh. HA counter continues correctly.",
-                self._te2_last_raw, te2_raw, self._te2_offset,
+                self._log_id, self._te2_last_raw, te2_raw, self._te2_offset,
             )
 
         # Store raw values for next reset detection
@@ -694,53 +737,114 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # the same monotonic-floor strategy already used above for te1/te2:
         # any decrease, however small or large, is clamped to the previous
         # highest value seen today.
+        #
+        # POST-MIDNIGHT CARRY-OVER (additional protection, e.g. battery systems):
+        # On some setups (e.g. EZ1 behind a Marstek B2500) the inverter runs
+        # continuously through midnight. Its firmware never resets the daily
+        # e1/e2 counter at midnight, so the first post-midnight value is the
+        # previous day's total, not 0. The monotonic floor alone cannot catch
+        # this because midnight resets _e1_protected to 0, making any positive
+        # carry-over value appear "new".
+        #
+        # Fix: use the independently tracked lifetime counter delta as the
+        # authoritative source for today's production. At midnight,
+        # _check_midnight_reset() saves _te1_day_start = _te1_last_out. Then
+        # te1_delta = te1_now - te1_day_start represents true today production
+        # (te1 is monotonic and overflow-compensated). If e1_raw exceeds
+        # te1_delta by more than _TODAY_TE_DELTA_TOLERANCE, it is carry-over
+        # and is replaced by te1_delta before the monotonic floor runs.
         e1_raw = output_data.e1
         e2_raw = output_data.e2
         today = dt_util.now().date()
 
         # Midnight reset is handled in _async_update_data – see _check_midnight_reset()
 
+        # Compute te1/te2 deltas once – used for both carry-over detection and as a
+        # continuously-growing floor during intra-day firmware resets (see hold branch).
+        te1_delta_e1: float | None = None
+        te2_delta_e2: float | None = None
+
+        if self._te1_day_start is not None:
+            te1_delta_e1 = max(0.0, te1 - self._te1_day_start)
+            if e1_raw > te1_delta_e1 + _TODAY_TE_DELTA_TOLERANCE:
+                self._e1_carryover_count += 1
+                if self._e1_carryover_count == 1 or self._e1_carryover_count % 50 == 0:
+                    LOGGER.debug(
+                        "[%s] e1 carry-over: firmware=%.3f kWh, te1_delta=%.3f kWh"
+                        " – overriding (poll %d).",
+                        self._log_id, e1_raw, te1_delta_e1, self._e1_carryover_count,
+                    )
+                e1_raw = te1_delta_e1
+            else:
+                self._e1_carryover_count = 0  # carry-over resolved
+
+        if self._te2_day_start is not None:
+            te2_delta_e2 = max(0.0, te2 - self._te2_day_start)
+            if e2_raw > te2_delta_e2 + _TODAY_TE_DELTA_TOLERANCE:
+                self._e2_carryover_count += 1
+                if self._e2_carryover_count == 1 or self._e2_carryover_count % 50 == 0:
+                    LOGGER.debug(
+                        "[%s] e2 carry-over: firmware=%.3f kWh, te2_delta=%.3f kWh"
+                        " – overriding (poll %d).",
+                        self._log_id, e2_raw, te2_delta_e2, self._e2_carryover_count,
+                    )
+                e2_raw = te2_delta_e2
+            else:
+                self._e2_carryover_count = 0  # carry-over resolved
+
         if e1_raw < self._e1_protected:
-            drop = self._e1_protected - e1_raw
+            # Use te1_delta as a continuously-growing floor so the sensor keeps
+            # updating even while the firmware holds e1 at 0 after an intra-day
+            # reset. Without this, the sensor would freeze at _e1_protected until
+            # e1_raw eventually climbs back above it.
+            effective_e1 = max(self._e1_protected, te1_delta_e1 if te1_delta_e1 is not None else 0.0)
+            drop = effective_e1 - e1_raw
+            self._e1_hold_count += 1
             if not self._e1_reset_logged and drop > _TODAY_DROP_LOG_EPSILON:
-                LOGGER.info(
-                    "APsystems EZ1 today energy (e1) dropped to %.5f kWh while last "
-                    "known value was %.5f kWh – firmware bug detected. Holding last "
-                    "value until it catches up or midnight resets it.",
-                    e1_raw, self._e1_protected,
+                LOGGER.debug(
+                    "[%s] Today energy (e1) dropped to %.3f kWh"
+                    " (floor %.3f kWh) – firmware bug, holding until recovered.",
+                    self._log_id, e1_raw, effective_e1,
                 )
                 self._e1_reset_logged = True
-            else:
+            elif self._e1_hold_count % 50 == 0:
                 LOGGER.debug(
-                    "e1 below protected value (%.5f < %.5f) – holding protected value.",
-                    e1_raw, self._e1_protected,
+                    "[%s] e1 hold active: firmware=%.3f kWh, floor=%.3f kWh (poll %d).",
+                    self._log_id, e1_raw, effective_e1, self._e1_hold_count,
                 )
-            output_data.e1 = self._e1_protected
+            self._e1_protected = effective_e1
+            output_data.e1 = effective_e1
         else:
             self._e1_protected = e1_raw
             self._protected_date = today
-            self._e1_reset_logged = False  # new high reached – future drops will log again
+            self._e1_reset_logged = False
+            self._e1_hold_count = 0
+            output_data.e1 = e1_raw  # propagate carry-over override (if fired) to sensor
 
         if e2_raw < self._e2_protected:
-            drop = self._e2_protected - e2_raw
+            effective_e2 = max(self._e2_protected, te2_delta_e2 if te2_delta_e2 is not None else 0.0)
+            drop = effective_e2 - e2_raw
+            self._e2_hold_count += 1
             if not self._e2_reset_logged and drop > _TODAY_DROP_LOG_EPSILON:
-                LOGGER.info(
-                    "APsystems EZ1 today energy (e2) dropped to %.5f kWh while last "
-                    "known value was %.5f kWh – firmware bug detected. Holding last "
-                    "value until it catches up or midnight resets it.",
-                    e2_raw, self._e2_protected,
+                LOGGER.debug(
+                    "[%s] Today energy (e2) dropped to %.3f kWh"
+                    " (floor %.3f kWh) – firmware bug, holding until recovered.",
+                    self._log_id, e2_raw, effective_e2,
                 )
                 self._e2_reset_logged = True
-            else:
+            elif self._e2_hold_count % 50 == 0:
                 LOGGER.debug(
-                    "e2 below protected value (%.5f < %.5f) – holding protected value.",
-                    e2_raw, self._e2_protected,
+                    "[%s] e2 hold active: firmware=%.3f kWh, floor=%.3f kWh (poll %d).",
+                    self._log_id, e2_raw, effective_e2, self._e2_hold_count,
                 )
-            output_data.e2 = self._e2_protected
+            self._e2_protected = effective_e2
+            output_data.e2 = effective_e2
         else:
             self._e2_protected = e2_raw
             self._protected_date = today
             self._e2_reset_logged = False
+            self._e2_hold_count = 0
+            output_data.e2 = e2_raw  # propagate carry-over override (if fired) to sensor
 
         return output_data, needs_save
 
@@ -757,26 +861,33 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         """
         today = dt_util.now().date()
         if today != self._protected_date:
-            LOGGER.info(
-                "Today energy counters reset at midnight – P1: %.5f kWh, P2: %.5f kWh.",
-                self._e1_protected, self._e2_protected,
+            LOGGER.debug(
+                "[%s] Today energy counters reset at midnight – P1: %.3f kWh, P2: %.3f kWh.",
+                self._log_id, self._e1_protected, self._e2_protected,
             )
+            # Anchor te1/te2 lifetime values at midnight so that carry-over detection
+            # in _compensate_lifetime_energy can derive true today production as
+            # te1_now - te1_day_start, independently of the firmware's daily counter.
+            self._te1_day_start = self._te1_last_out
+            self._te2_day_start = self._te2_last_out
             self._e1_protected = 0.0
             self._e2_protected = 0.0
             self._e1_reset_logged = False
             self._e2_reset_logged = False
+            self._e1_carryover_count = 0
+            self._e2_carryover_count = 0
+            self._e1_hold_count = 0
+            self._e2_hold_count = 0
             self._protected_date = today
             # Also reset fallback data today energy values
             self._fallback_data.output_data.e1 = 0.0
             self._fallback_data.output_data.e2 = 0.0
-            LOGGER.debug("Fallback data today energy reset to 0 at midnight.")
+            LOGGER.debug("[%s] Fallback data today energy reset to 0 at midnight.", self._log_id)
             # Reset error counter so the morning polls are all attempted normally.
-            # Without this, the reduced polling rate (every 5th poll after 10
-            # errors) would persist into the new day and delay inverter detection.
             if self._consecutive_errors > 0:
                 LOGGER.debug(
-                    "Consecutive error counter reset at midnight (%d → 0).",
-                    self._consecutive_errors,
+                    "[%s] Consecutive error counter reset at midnight (%d → 0).",
+                    self._log_id, self._consecutive_errors,
                 )
                 self._consecutive_errors = 0
                 self._skip_poll_counter = 0
@@ -799,13 +910,12 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             stuck_for = time.monotonic() - self._poll_active_since
             if stuck_for > 30:
                 LOGGER.warning(
-                    "poll_active lock was stuck for %.0fs – force-releasing. "
-                    "This may indicate a previous poll was cancelled unexpectedly.",
-                    stuck_for,
+                    "[%s] poll_active lock stuck for %.0fs – force-releasing.",
+                    self._log_id, stuck_for,
                 )
                 self._poll_active = False
             else:
-                LOGGER.debug("Poll already active – returning cached data.")
+                LOGGER.debug("[%s] Poll already active – returning cached data.", self._log_id)
                 return self._fallback_data
 
         # Reduce actual API attempts after 10 consecutive errors (inverter is
@@ -828,22 +938,20 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         except InverterReturnedError:
             self._consecutive_errors += 1
             if self._consecutive_errors == 1:
-                LOGGER.info(
-                    "APsystems inverter returned an error – "
-                    "serving cached data (likely entering night/standby mode)."
+                LOGGER.debug(
+                    "[%s] Inverter returned an error – serving cached data "
+                    "(likely entering night/standby mode).", self._log_id,
                 )
             elif self._consecutive_errors == 10:
-                LOGGER.info(
-                    "APsystems inverter still returning errors after %d polls (%ds). "
-                    "If this is not nightly standby, check the inverter.",
-                    self._consecutive_errors,
+                LOGGER.debug(
+                    "[%s] Inverter still returning errors after %d polls (%ds).",
+                    self._log_id, self._consecutive_errors,
                     self._consecutive_errors * POLLING_INTERVAL,
                 )
             elif self._consecutive_errors % 50 == 0:
-                # ~10 min throttle to avoid log flood
                 LOGGER.debug(
-                    "Inverter error (consecutive: %d) – serving cached data.",
-                    self._consecutive_errors,
+                    "[%s] Inverter error (consecutive: %d) – serving cached data.",
+                    self._log_id, self._consecutive_errors,
                 )
             # Zero power immediately on any error – prevents false statistics
             self._fallback_data.output_data.p1 = 0
@@ -875,23 +983,21 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         except Exception as err:  # noqa: BLE001
             self._consecutive_errors += 1
             if self._consecutive_errors == 1:
-                LOGGER.info(
-                    "APsystems inverter unreachable – "
-                    "serving cached data. Error: %s", _fmt_err(err),
+                LOGGER.debug(
+                    "[%s] Inverter unreachable – serving cached data. Error: %s",
+                    self._log_id, _fmt_err(err),
                 )
             elif self._consecutive_errors == 10:
-                LOGGER.info(
-                    "APsystems inverter still unreachable after %d polls (%ds). "
-                    "Check network connection. Error: %s",
-                    self._consecutive_errors,
-                    self._consecutive_errors * self.update_interval.total_seconds(),
+                LOGGER.debug(
+                    "[%s] Inverter still unreachable after %d polls (%ds). Error: %s",
+                    self._log_id, self._consecutive_errors,
+                    int(self._consecutive_errors * self.update_interval.total_seconds()),
                     _fmt_err(err),
                 )
             elif self._consecutive_errors % 50 == 0:
-                # ~10 min throttle (50 × 12 s) to avoid log flood
                 LOGGER.debug(
-                    "Inverter unreachable (consecutive: %d) – serving cached data.",
-                    self._consecutive_errors,
+                    "[%s] Inverter unreachable (consecutive: %d) – serving cached data.",
+                    self._log_id, self._consecutive_errors,
                 )
             # Zero power immediately on any error – prevents false statistics
             self._fallback_data.output_data.p1 = 0
@@ -998,10 +1104,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     self.battery_system = getattr(device_info, "isBatterySystem", False)
                     self.device_ip = getattr(device_info, "ipAddr", "unknown")
                     if self.device_version != "unknown":
-                        LOGGER.info(
-                            "APsystems inverter info retrieved – firmware: %s, IP: %s",
-                            self.device_version,
-                            self.device_ip,
+                        LOGGER.debug(
+                            "[%s] Inverter info retrieved – firmware: %s",
+                            self._log_id, self.device_version,
                         )
                         self._device_info_retries = 99  # stop retrying
                     else:
@@ -1014,9 +1119,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     )
 
         if self._consecutive_errors > 0:
-            LOGGER.info(
-                "APsystems inverter back online after %d consecutive errors.",
-                self._consecutive_errors,
+            LOGGER.debug(
+                "[%s] Inverter back online after %d consecutive errors.",
+                self._log_id, self._consecutive_errors,
             )
             self._consecutive_errors = 0
             self._skip_poll_counter = 0
@@ -1073,37 +1178,35 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     )
                     if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
                         await self.api.set_max_power(int(self.current_max_power))
-                        LOGGER.info(
-                            "Restored power limit to %sW (RAM) after inverter restart "
-                            "(inverter RAM was %sW).%s",
-                            self.current_max_power, inverter_limit,
-                            " Battery system detected – extended verification active." if _is_battery else "",
+                        LOGGER.debug(
+                            "[%s] Power limit restored to %sW (RAM) after restart"
+                            " (inverter had %sW).%s",
+                            self._log_id, self.current_max_power, inverter_limit,
+                            " Battery system – extended verification active." if _is_battery else "",
                         )
-                        # Schedule first verification round
                         self._power_limit_verify_at = time.monotonic() + _VERIFY_INTERVAL
                         self._power_limit_verify_count = 0
                     else:
                         LOGGER.debug(
-                            "Power limit OK after restart: inverter RAM=%sW, stored=%sW.",
-                            inverter_limit, self.current_max_power,
+                            "[%s] Power limit OK after restart: inverter RAM=%sW, stored=%sW.",
+                            self._log_id, inverter_limit, self.current_max_power,
                         )
-                        # Still schedule verification – EZ1 may reload flash later
                         self._power_limit_verify_at = time.monotonic() + _VERIFY_INTERVAL
                         self._power_limit_verify_count = 0
                     self._power_limit_restored = True
                 except Exception as err:  # noqa: BLE001
                     if _restore_attempt < _MAX_RESTORE_ATTEMPTS:
                         LOGGER.warning(
-                            "Could not restore power limit (attempt %d/%d): %s",
-                            _restore_attempt, _MAX_RESTORE_ATTEMPTS, _fmt_err(err),
+                            "[%s] Could not restore power limit (attempt %d/%d): %s",
+                            self._log_id, _restore_attempt, _MAX_RESTORE_ATTEMPTS, _fmt_err(err),
                         )
                     else:
-                        LOGGER.info(
-                            "Power limit restore gave up after %d attempts: %s. "
-                            "Limit will be restored on next inverter restart.",
-                            _MAX_RESTORE_ATTEMPTS, _fmt_err(err),
+                        LOGGER.warning(
+                            "[%s] Power limit restore failed after %d attempts: %s. "
+                            "Will retry on next inverter restart.",
+                            self._log_id, _MAX_RESTORE_ATTEMPTS, _fmt_err(err),
                         )
-                        self._power_limit_restored = True  # stop retrying this session
+                        self._power_limit_restored = True
             elif _verify_due:
                 # Verification round: check if EZ1 still has the correct limit
                 self._power_limit_verify_count += 1
@@ -1112,19 +1215,17 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     inverter_limit = await self.api.get_max_power()
                     if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
                         await self.api.set_max_power(int(self.current_max_power))
-                        LOGGER.info(
-                            "Power limit re-applied to %sW (RAM) – EZ1 had reloaded "
-                            "flash (%sW) during morning startup "
-                            "(verification round %d/%d).",
-                            self.current_max_power, inverter_limit,
+                        LOGGER.debug(
+                            "[%s] Power limit re-applied to %sW (RAM) – EZ1 had reloaded "
+                            "flash (%sW) (verification round %d/%d).",
+                            self._log_id, self.current_max_power, inverter_limit,
                             self._power_limit_verify_count, _MAX_VERIFY_ROUNDS,
                         )
                     else:
                         LOGGER.debug(
-                            "Power limit verification OK (round %d/%d): "
-                            "inverter RAM=%sW, stored=%sW.",
-                            self._power_limit_verify_count, _MAX_VERIFY_ROUNDS,
-                            inverter_limit, self.current_max_power,
+                            "[%s] Power limit verification OK (round %d/%d): RAM=%sW.",
+                            self._log_id, self._power_limit_verify_count, _MAX_VERIFY_ROUNDS,
+                            inverter_limit,
                         )
                     # Schedule next round if budget remaining
                     if self._power_limit_verify_count < _MAX_VERIFY_ROUNDS:
@@ -1156,26 +1257,27 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     resp = await self.api._request("getOnOff")
                     already_off = resp and resp.get("data", {}).get("status") == "1"
                     if already_off:
-                        LOGGER.debug("Switch restore: EZ1 already OFF – skipping setOnOff.")
+                        LOGGER.debug("[%s] Switch restore: EZ1 already OFF – skipping.", self._log_id)
                     else:
                         await self.api.set_device_power_status(0)
-                        LOGGER.info(
-                            "Inverter switch restored to OFF after reconnect (attempt %d/%d).",
-                            _switch_restore_attempt, _SWITCH_RESTORE_MAX_ATTEMPTS,
+                        LOGGER.debug(
+                            "[%s] Inverter switch restored to OFF after reconnect (attempt %d/%d).",
+                            self._log_id, _switch_restore_attempt, _SWITCH_RESTORE_MAX_ATTEMPTS,
                         )
                     self._switch_restore_verify_at = _now_sw + _SWITCH_RESTORE_VERIFY_INTERVAL
                     self._switch_restore_done = True
                 except Exception as err:  # noqa: BLE001
                     if _switch_restore_attempt < _SWITCH_RESTORE_MAX_ATTEMPTS:
                         LOGGER.warning(
-                            "Could not restore inverter OFF state (attempt %d/%d): %s",
-                            _switch_restore_attempt, _SWITCH_RESTORE_MAX_ATTEMPTS, _fmt_err(err),
+                            "[%s] Could not restore inverter OFF state (attempt %d/%d): %s",
+                            self._log_id, _switch_restore_attempt, _SWITCH_RESTORE_MAX_ATTEMPTS,
+                            _fmt_err(err),
                         )
                     else:
                         LOGGER.warning(
-                            "Could not restore inverter OFF state after %d attempts: %s. "
+                            "[%s] Could not restore inverter OFF state after %d attempts: %s. "
                             "Please toggle the switch manually.",
-                            _SWITCH_RESTORE_MAX_ATTEMPTS, _fmt_err(err),
+                            self._log_id, _SWITCH_RESTORE_MAX_ATTEMPTS, _fmt_err(err),
                         )
                         self._switch_restore_done = True
 
@@ -1185,9 +1287,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     resp = await self.api._request("getOnOff")
                     if resp and resp.get("data", {}).get("status") == "0":
                         await self.api.set_device_power_status(0)
-                        LOGGER.info("Inverter switch re-applied to OFF – EZ1 had reset to ON.")
+                        LOGGER.debug("[%s] Switch re-applied to OFF – EZ1 had reset to ON.", self._log_id)
                     else:
-                        LOGGER.debug("Switch verification OK – EZ1 is OFF.")
+                        LOGGER.debug("[%s] Switch verification OK – EZ1 is OFF.", self._log_id)
                     self._switch_restore_verify_at = _now_sw + _SWITCH_RESTORE_VERIFY_INTERVAL
                 except Exception:  # noqa: BLE001
                     self._switch_restore_verify_at = _now_sw + _SWITCH_RESTORE_VERIFY_INTERVAL
