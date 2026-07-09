@@ -26,15 +26,16 @@ from .const import (
     CONF_LIFETIME_OFFSET_P1,
     CONF_LIFETIME_OFFSET_P2,
     CONF_POLLING_INTERVAL,
+    CONF_SHOWN_OFFSET_P1,
+    CONF_SHOWN_OFFSET_P2,
     DOMAIN,
     LOGGER,
     MODEL_BY_MAX_POWER,
     POLLING_INTERVAL,
+    STORE_KEY,
+    STORE_VERSION,
     UNKNOWN_MODEL_NAME,
 )
-
-STORE_VERSION = 1
-STORE_KEY = "apsystems_lifetime_offset"
 
 _OVERFLOW_RESET_THRESHOLD = 500.0  # kWh – real firmware overflow drops from ~540 to ~0
 
@@ -409,18 +410,23 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # using that fallback would wrongly cap EZ1-D at 800W.
         if self.device_version == "unknown":
             LOGGER.debug(
-                "Skipping flash reset – device info not yet known. Will retry after next successful poll."
+                "[%s] Skipping flash reset – device info not yet known."
+                " Will retry after next successful poll.", self._log_id,
             )
             return
 
         hardware_max = int(self.api.max_power)
         if hardware_max <= 0:
-            LOGGER.debug("Skipping flash reset – hardware max is not valid (%sW).", hardware_max)
+            LOGGER.debug(
+                "[%s] Skipping flash reset – hardware max is not valid (%sW).",
+                self._log_id, hardware_max,
+            )
             return
 
         if self.default_max_power == hardware_max:
             LOGGER.debug(
-                "Flash already at hardware maximum (%sW) – no write needed.", hardware_max
+                "[%s] Flash already at hardware maximum (%sW) – no write needed.",
+                self._log_id, hardware_max,
             )
             return
         try:
@@ -576,10 +582,34 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 detail_data=self._fallback_detail,
             )
 
-            # Detect reconfigure: if the config-entry offset differs from
-            # the last value we applied, the user changed it → apply the delta.
-            prev_p1 = float(data.get("applied_offset_p1", 0.0))
-            prev_p2 = float(data.get("applied_offset_p2", 0.0))
+            # Detect reconfigure: compute the delta between what the user entered
+            # in the reconfigure dialog and the reference value that was shown to
+            # them at the time they opened it.
+            #
+            # CONF_SHOWN_OFFSET_P1 is written by the reconfigure flow to record
+            # exactly what was pre-filled in the dialog.  This is the correct
+            # reference for the delta, covering both the normal case (user changed
+            # a value they entered themselves) and the bug-recovery case (storage
+            # held an unexpected offset while the config entry showed 0.0).
+            #
+            # Falls back to applied_offset_p1 (backward compat with older versions
+            # that did not write shown_offset) and then to 0 if neither is present.
+            shown_p1 = cfg.get(CONF_SHOWN_OFFSET_P1)
+            shown_p2 = cfg.get(CONF_SHOWN_OFFSET_P2)
+            if shown_p1 is not None:
+                prev_p1 = float(shown_p1)
+                prev_p2 = float(shown_p2) if shown_p2 is not None else 0.0
+                # Clear the transient keys now that we have consumed them.
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={
+                        k: v for k, v in self.config_entry.data.items()
+                        if k not in (CONF_SHOWN_OFFSET_P1, CONF_SHOWN_OFFSET_P2)
+                    },
+                )
+            else:
+                prev_p1 = float(data.get("applied_offset_p1", 0.0))
+                prev_p2 = float(data.get("applied_offset_p2", 0.0))
             delta_p1 = cfg_p1 - prev_p1
             delta_p2 = cfg_p2 - prev_p2
             if abs(delta_p1) > 0.0001 or abs(delta_p2) > 0.0001:
@@ -1067,7 +1097,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         except Exception as err:  # noqa: BLE001
             if self._detail_supported is None:
                 LOGGER.debug(
-                    "getOutputDataDetail not available on this firmware: %s", _fmt_err(err)
+                    "[%s] getOutputDataDetail not available on this firmware: %s",
+                    self._log_id, _fmt_err(err),
                 )
                 self._detail_supported = False
         return None
@@ -1114,8 +1145,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 except Exception as err:  # noqa: BLE001
                     self._device_info_retries += 1
                     LOGGER.debug(
-                        "Could not retrieve inverter info on poll (retry %d/3): %s",
-                        self._device_info_retries, _fmt_err(err)
+                        "[%s] Could not retrieve inverter info on poll (retry %d/3): %s",
+                        self._log_id, self._device_info_retries, _fmt_err(err),
                     )
 
         if self._consecutive_errors > 0:
@@ -1173,8 +1204,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 try:
                     inverter_limit = await self.api.get_max_power()
                     LOGGER.debug(
-                        "Power limit check: inverter RAM=%sW, stored=%sW",
-                        inverter_limit, self.current_max_power,
+                        "[%s] Power limit check: inverter RAM=%sW, stored=%sW",
+                        self._log_id, inverter_limit, self.current_max_power,
                     )
                     if inverter_limit is not None and abs(float(inverter_limit) - self.current_max_power) > 1:
                         await self.api.set_max_power(int(self.current_max_power))
@@ -1232,8 +1263,8 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                         self._power_limit_verify_at = time.monotonic() + _VERIFY_INTERVAL
                     else:
                         LOGGER.debug(
-                            "Power limit verification complete after %d rounds.",
-                            _MAX_VERIFY_ROUNDS,
+                            "[%s] Power limit verification complete after %d rounds.",
+                            self._log_id, _MAX_VERIFY_ROUNDS,
                         )
                 except Exception:  # noqa: BLE001
                     # Reschedule on transient error if budget remaining

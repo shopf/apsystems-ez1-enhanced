@@ -25,7 +25,7 @@
       },
       "reconfigure": {
         "title": "Update APsystems settings",
-        "description": "Correct connection details or lifetime energy offsets.",
+        "description": "{offset_info}Correct connection details or lifetime energy offsets.",
         "data": {
           "ip_address": "IP address",
           "port": "Port",

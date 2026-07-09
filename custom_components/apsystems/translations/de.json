@@ -25,7 +25,7 @@
       },
       "reconfigure": {
         "title": "APsystems Einstellungen anpassen",
-        "description": "Verbindungsdaten oder Lifetime-Energie-Offsets korrigieren.",
+        "description": "{offset_info}Verbindungsdaten oder Lifetime-Energie-Offsets korrigieren.",
         "data": {
           "ip_address": "IP-Adresse",
           "port": "Port",

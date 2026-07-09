@@ -9,6 +9,7 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_IP_ADDRESS, CONF_PORT
+from homeassistant.helpers.storage import Store
 
 from .const import (
     CONF_BATTERY_SYSTEM,
@@ -16,12 +17,16 @@ from .const import (
     CONF_LIFETIME_OFFSET_P1,
     CONF_LIFETIME_OFFSET_P2,
     CONF_POLLING_INTERVAL,
+    CONF_SHOWN_OFFSET_P1,
+    CONF_SHOWN_OFFSET_P2,
     DEFAULT_DEVICE_NAME,
     DEFAULT_PORT,
     DOMAIN,
     MAX_POLLING_INTERVAL,
     MIN_POLLING_INTERVAL,
     POLLING_INTERVAL,
+    STORE_KEY,
+    STORE_VERSION,
 )
 
 
@@ -121,6 +126,35 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
         current_p2 = entry.data.get(CONF_LIFETIME_OFFSET_P2, 0.0)
         current_battery = entry.data.get(CONF_BATTERY_SYSTEM, False)
 
+        # Load storage once when the form is first shown (user_input is None).
+        # We detect the bug scenario where storage holds a non-zero offset that
+        # the user never deliberately set (config entry still shows 0.0).
+        # In that case we pre-fill the dialog with the actual stored value so
+        # the user can see and correct it.  A previously deliberate entry
+        # (current_p1 != 0) is always preserved and never overwritten.
+        if user_input is None:
+            store = Store(
+                self.hass, STORE_VERSION,
+                f"{STORE_KEY}_{entry.entry_id}",
+            )
+            stored = await store.async_load() or {}
+            stored_te1 = float(stored.get("te1_offset", 0.0))
+            stored_te2 = float(stored.get("te2_offset", 0.0))
+
+            # Bug-recovery: storage has an unexpected offset, config entry is 0.
+            cfg_p1_zero = abs(current_p1) < 0.0001
+            cfg_p2_zero = abs(current_p2) < 0.0001
+            storage_has_offset = abs(stored_te1) > 0.0001 or abs(stored_te2) > 0.0001
+
+            if cfg_p1_zero and cfg_p2_zero and storage_has_offset:
+                self._prefill_p1 = stored_te1
+                self._prefill_p2 = stored_te2
+                self._offset_warning = True
+            else:
+                self._prefill_p1 = current_p1
+                self._prefill_p2 = current_p2
+                self._offset_warning = False
+
         if user_input is not None:
             try:
                 offset_p1 = _parse_offset(user_input.get(CONF_LIFETIME_OFFSET_P1))
@@ -145,8 +179,31 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                         CONF_LIFETIME_OFFSET_P1: offset_p1,
                         CONF_LIFETIME_OFFSET_P2: offset_p2,
                         CONF_BATTERY_SYSTEM: user_input.get(CONF_BATTERY_SYSTEM, False),
+                        # Record what was shown to the user – the coordinator uses
+                        # this as the delta reference and removes it after applying.
+                        CONF_SHOWN_OFFSET_P1: self._prefill_p1,
+                        CONF_SHOWN_OFFSET_P2: self._prefill_p2,
                     },
                 )
+
+        # Build description placeholder: empty string for normal flow, warning
+        # text for the bug-recovery case.
+        if self._offset_warning:
+            offset_info = (
+                f"⚠️ A stored offset of {self._prefill_p1:.5f} kWh (P1) / "
+                f"{self._prefill_p2:.5f} kWh (P2) was detected in storage that "
+                f"differs from your saved configuration (which shows 0). "
+                f"This is likely caused by an integration bug in an earlier version. "
+                f"The fields below have been pre-filled with the stored values. "
+                f"To remove the incorrect offset, set both fields to 0. "
+                f"The lifetime counter will be adjusted automatically on next restart. "
+                f"⚠️ Reducing the offset will lower the displayed lifetime total permanently.\n\n"
+            )
+        else:
+            offset_info = ""
+
+        prefill_p1_str = str(self._prefill_p1) if self._prefill_p1 else ""
+        prefill_p2_str = str(self._prefill_p2) if self._prefill_p2 else ""
 
         return self.async_show_form(
             step_id="reconfigure",
@@ -167,17 +224,18 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(
                         CONF_LIFETIME_OFFSET_P1,
-                        default=str(current_p1) if current_p1 else "",
+                        default=prefill_p1_str,
                     ): str,
                     vol.Optional(
                         CONF_LIFETIME_OFFSET_P2,
-                        default=str(current_p2) if current_p2 else "",
+                        default=prefill_p2_str,
                     ): str,
                     vol.Optional(CONF_BATTERY_SYSTEM, default=current_battery): bool,
                 }
             ),
             errors=errors,
             description_placeholders={
+                "offset_info": offset_info,
                 "min_interval": str(MIN_POLLING_INTERVAL),
                 "max_interval": str(MAX_POLLING_INTERVAL),
             },

@@ -21,6 +21,17 @@ MAX_POLLING_INTERVAL = 60
 CONF_LIFETIME_OFFSET_P1 = "lifetime_offset_p1"
 CONF_LIFETIME_OFFSET_P2 = "lifetime_offset_p2"
 
+# Internal config-entry keys used to pass the delta-calculation reference from
+# the reconfigure flow to the coordinator without writing to storage prematurely.
+# Cleared from the config entry after the coordinator has applied the delta.
+CONF_SHOWN_OFFSET_P1 = "shown_offset_p1"
+CONF_SHOWN_OFFSET_P2 = "shown_offset_p2"
+
+# Storage key and version – defined here so config_flow can load the store
+# without importing from coordinator (which would create a circular dependency).
+STORE_KEY = "apsystems_lifetime_offset"
+STORE_VERSION = 1
+
 # Optional: user declares that the inverter is connected to a battery system.
 # Enables more frequent power limit verification after morning restart
 # (every 5 min × 10 rounds instead of every 10 min × 5 rounds).
