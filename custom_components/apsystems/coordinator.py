@@ -28,6 +28,7 @@ from .const import (
     CONF_POLLING_INTERVAL,
     CONF_SHOWN_OFFSET_P1,
     CONF_SHOWN_OFFSET_P2,
+    CONF_SLOW_DETAIL_POLL,
     DOMAIN,
     LOGGER,
     MODEL_BY_MAX_POWER,
@@ -60,6 +61,15 @@ _TODAY_TE_DELTA_TOLERANCE = 0.02  # kWh
 # avoid WLAN reconnects on firmware 1.12.2 which reconnects frequently.
 # Output data is read on every poll.
 _ALARM_POLL_INTERVAL = 10
+
+# /getOutputDataDetail (voltage, current, temperature, grid data) is a heavier
+# endpoint than /getOutputData. Some models – notably the EZ1-D on firmware
+# 2.2.6 – need 20-30 s of HTTP-server recovery time after each call. Calling
+# it on every poll therefore causes a reliable timeout cycle. We decouple it
+# from the main poll and call it at most once every 60 seconds regardless of
+# the configured polling interval. Voltage / temperature sensors stay fresh
+# enough; power / energy sensors continue updating on every poll.
+_DETAIL_MIN_INTERVAL = 60.0  # seconds between getOutputDataDetail calls
 
 _SWITCH_RESTORE_START_POLL = 3
 _SWITCH_RESTORE_MAX_ATTEMPTS = 5
@@ -184,6 +194,14 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
     _e2_carryover_count: int = 0
     _e1_hold_count: int = 0       # increments each poll while monotonic hold active
     _e2_hold_count: int = 0
+
+    # Timestamp of the last successful getOutputDataDetail call (monotonic).
+    # float('-inf') ensures the first poll always triggers a real API call,
+    # even if time.monotonic() is less than _DETAIL_MIN_INTERVAL seconds
+    # (e.g. on a freshly booted system or container where monotonic time
+    # starts near zero). Reset to 0.0 on reconnect – by then uptime is
+    # always well above 60 s so the first post-outage poll fires immediately.
+    _detail_last_ts: float = float("-inf")
 
     # Device IP address shown in device info
     device_ip: str = "unknown"
@@ -546,6 +564,22 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 self._te1_day_start = float(te1ds) if te1ds is not None else None
                 self._te2_day_start = float(te2ds) if te2ds is not None else None
 
+                # If te1_day_start is missing (null) – e.g. after upgrading from an
+                # older version or after a same-day reconfigure before midnight – derive
+                # it from the corrected lifetime total minus today's protected production.
+                # Without a valid anchor, the carry-over check and te1_delta floor are
+                # both disabled, causing today energy sensors to freeze whenever the
+                # firmware's e1/e2 counter resets below _e1_protected.
+                if self._te1_day_start is None and self._te1_last_out is not None:
+                    self._te1_day_start = self._te1_last_out - self._e1_protected
+                    LOGGER.debug(
+                        "[%s] te1_day_start derived from te1_last_out − e1_protected"
+                        " = %.5f kWh (te1_day_start was not saved).",
+                        self._log_id, self._te1_day_start,
+                    )
+                if self._te2_day_start is None and self._te2_last_out is not None:
+                    self._te2_day_start = self._te2_last_out - self._e2_protected
+
             mp = data.get("current_max_power")
             if mp is not None:
                 self.current_max_power = float(mp)
@@ -619,6 +653,18 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                     self._te1_last_out += delta_p1
                 if self._te2_last_out is not None:
                     self._te2_last_out += delta_p2
+                # Keep te1_day_start consistent after the offset shift so the
+                # carry-over check and te1_delta floor remain valid.
+                # If no anchor existed yet (null), derive it now from the
+                # corrected lifetime total and today's protected production.
+                if self._te1_day_start is not None:
+                    self._te1_day_start += delta_p1
+                elif self._te1_last_out is not None:
+                    self._te1_day_start = self._te1_last_out - self._e1_protected
+                if self._te2_day_start is not None:
+                    self._te2_day_start += delta_p2
+                elif self._te2_last_out is not None:
+                    self._te2_day_start = self._te2_last_out - self._e2_protected
                 LOGGER.info(
                     "[%s] Lifetime energy offset updated via reconfigure – "
                     "P1 delta: %+.5f kWh (new total: %.5f kWh), "
@@ -1161,6 +1207,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             self._power_limit_verify_count = 0
             self._switch_restore_done = False
             self._switch_restore_verify_at = 0.0
+            self._detail_last_ts = 0.0  # fetch fresh detail data on first post-outage poll
 
         self.inverter_reachable = True
 
@@ -1333,7 +1380,36 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             # and prevents lifetime energy jumps after cold start
             await self._save_state()
 
-        detail_data = await self._get_output_data_detail()
+        # Decouple getOutputDataDetail from the main poll cycle (optional).
+        # When CONF_SLOW_DETAIL_POLL is enabled, voltage / current / temperature
+        # and grid data are only fetched once per _DETAIL_MIN_INTERVAL seconds.
+        # All other polls serve the last known values from _fallback_detail.
+        # This prevents timeout loops on inverters with limited HTTP server
+        # capacity (observed on EZ1-D firmware 2.2.6).
+        # When the option is disabled (default), detail is fetched on every poll
+        # exactly as before – no behaviour change for existing EZ1-M users.
+        _slow_detail = bool(
+            self.config_entry.data.get(CONF_SLOW_DETAIL_POLL, False)
+        )
+        _now_detail = time.monotonic()
+        _detail_due = (not _slow_detail) or (
+            _now_detail - self._detail_last_ts >= _DETAIL_MIN_INTERVAL
+        )
+
+        if _detail_due:
+            detail_data = await self._get_output_data_detail()
+            if detail_data is not None:
+                self._detail_last_ts = _now_detail
+                self._fallback_detail = detail_data  # keep cache fresh
+        else:
+            detail_data = None
+            LOGGER.debug(
+                "[%s] getOutputDataDetail skipped (last call %.0fs ago,"
+                " interval %ss) – serving cached detail.",
+                self._log_id,
+                _now_detail - self._detail_last_ts,
+                int(_DETAIL_MIN_INTERVAL),
+            )
 
         # When detail_data is None (transient error while endpoint IS supported),
         # use the zero-fallback so sensors show 0 instead of "unknown"

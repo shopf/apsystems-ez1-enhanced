@@ -11,7 +11,8 @@
           "polling_interval": "Abfrageintervall (Sekunden)",
           "lifetime_offset_p1": "Lifetime-Energie Startoffset Eingang 1 (kWh)",
           "lifetime_offset_p2": "Lifetime-Energie Startoffset Eingang 2 (kWh)",
-          "battery_system": "Batterie-System (Speicher angeschlossen)"
+          "battery_system": "Batterie-System (Speicher angeschlossen)",
+          "slow_detail_poll": "Erweiterte Daten langsamer abfragen (empfohlen für EZ1-D)"
         },
         "data_description": {
           "ip_address": "Lokale IP-Adresse des Wechselrichters (statische IP empfohlen).",
@@ -20,7 +21,8 @@
           "polling_interval": "Wie oft der Wechselrichter abgefragt wird (12–60 Sekunden). Kleinere Werte erhöhen die Last auf dem Wechselrichter und können zu WLAN-Verbindungsabbrüchen führen. Standard: 12 Sekunden.",
           "lifetime_offset_p1": "Optional. Nur ausfüllen wenn der interne Zähler des Wechselrichters bereits einmal auf 0 zurückgesprungen ist (bekannter Firmware-Bug bei ~540 kWh). Wert in kWh eingeben der vor dem Reset bereits erzeugt wurde, z. B. '542.3'. Leer lassen wenn kein Reset stattgefunden hat.",
           "lifetime_offset_p2": "Gleiche Eingabe wie oben, aber für Eingang 2. Leer lassen wenn kein Reset stattgefunden hat.",
-          "battery_system": "Aktivieren wenn der Wechselrichter an einem Batteriespeicher angeschlossen ist. Aktiviert häufigere Überprüfungen (alle 5 Min. statt 10 Min.) ob die Leistungsbegrenzung nach dem morgendlichen Neustart korrekt wiederhergestellt wurde."
+          "battery_system": "Aktivieren wenn der Wechselrichter an einem Batteriespeicher angeschlossen ist. Aktiviert häufigere Überprüfungen (alle 5 Min. statt 10 Min.) ob die Leistungsbegrenzung nach dem morgendlichen Neustart korrekt wiederhergestellt wurde.",
+          "slow_detail_poll": "Spannung, Strom und Temperatur werden alle 60 s statt bei jedem Poll abgefragt. Leistungs- und Energiesensoren sind nicht betroffen. Verhindert Timeout-Schleifen bei Wechselrichtern mit begrenzter HTTP-Server-Kapazität (z. B. EZ1-D Firmware 2.x)."
         }
       },
       "reconfigure": {
@@ -32,12 +34,14 @@
           "polling_interval": "Abfrageintervall (Sekunden)",
           "lifetime_offset_p1": "Lifetime-Energie Startoffset Eingang 1 (kWh)",
           "lifetime_offset_p2": "Lifetime-Energie Startoffset Eingang 2 (kWh)",
-          "battery_system": "Batterie-System (Speicher angeschlossen)"
+          "battery_system": "Batterie-System (Speicher angeschlossen)",
+          "slow_detail_poll": "Erweiterte Daten langsamer abfragen (empfohlen für EZ1-D)"
         },
         "data_description": {
           "lifetime_offset_p1": "Aktuell gespeicherter Offset für Eingang 1. Nur ändern wenn der Wert falsch eingetragen wurde oder ein neuer Reset stattgefunden hat. ⚠️ Negative Werte reduzieren den angezeigten Lifetime-Zähler dauerhaft um diesen Betrag. Korrektur ist über erneutes Reconfigure mit angepasstem Wert möglich.",
           "lifetime_offset_p2": "Aktuell gespeicherter Offset für Eingang 2. ⚠️ Negative Werte reduzieren den angezeigten Lifetime-Zähler dauerhaft um diesen Betrag. Korrektur ist über erneutes Reconfigure mit angepasstem Wert möglich.",
-          "battery_system": "Aktivieren wenn der Wechselrichter an einem Batteriespeicher angeschlossen ist."
+          "battery_system": "Aktivieren wenn der Wechselrichter an einem Batteriespeicher angeschlossen ist.",
+          "slow_detail_poll": "Spannung, Strom und Temperatur werden alle 60 s statt bei jedem Poll abgefragt. Leistungs- und Energiesensoren sind nicht betroffen. Verhindert Timeout-Schleifen bei Wechselrichtern mit begrenzter HTTP-Server-Kapazität (z. B. EZ1-D Firmware 2.x)."
         }
       }
     },
