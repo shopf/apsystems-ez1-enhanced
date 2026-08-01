@@ -12,7 +12,8 @@
           "lifetime_offset_p1": "Lifetime energy start offset input 1 (kWh)",
           "lifetime_offset_p2": "Lifetime energy start offset input 2 (kWh)",
           "battery_system": "Battery system (storage connected)",
-          "slow_detail_poll": "Slow down extended data polling (recommended for EZ1-D)"
+          "slow_detail_poll": "Slow down extended data polling (recommended for EZ1-D)",
+          "detail_poll": "Query extended data (voltage, current, temperature)"
         },
         "data_description": {
           "ip_address": "Local IP address of the inverter (static IP recommended).",
@@ -22,7 +23,8 @@
           "lifetime_offset_p1": "Optional. Only fill in if the inverter's internal counter has already reset to 0 (known firmware bug at ~540 kWh). Enter the amount produced before the reset in kWh, e.g. '542.3'. Leave empty if no reset has occurred.",
           "lifetime_offset_p2": "Same as above but for input 2. Leave empty if no reset has occurred.",
           "battery_system": "Enable if the inverter is connected to a battery storage system. Activates more frequent verification (every 5 min instead of 10 min) that the power limit is correctly restored after the morning restart.",
-          "slow_detail_poll": "Voltage, current and temperature are polled every 60 s instead of every cycle. Power and energy sensors are unaffected. Prevents timeout loops on inverters with limited HTTP server capacity (e.g. EZ1-D firmware 2.x)."
+          "slow_detail_poll": "Only applies when extended data polling is enabled above. Voltage, current and temperature are polled every 60 s instead of every cycle. Power and energy sensors are unaffected. Prevents timeout loops on inverters with limited HTTP server capacity (e.g. EZ1-D firmware 2.x).",
+          "detail_poll": "When disabled, only power and energy are polled. Disable if the inverter remains unstable (last resort, especially for EZ1-D with very old firmware)."
         }
       },
       "reconfigure": {
@@ -35,13 +37,15 @@
           "lifetime_offset_p1": "Lifetime energy start offset input 1 (kWh)",
           "lifetime_offset_p2": "Lifetime energy start offset input 2 (kWh)",
           "battery_system": "Battery system (storage connected)",
-          "slow_detail_poll": "Slow down extended data polling (recommended for EZ1-D)"
+          "slow_detail_poll": "Slow down extended data polling (recommended for EZ1-D)",
+          "detail_poll": "Query extended data (voltage, current, temperature)"
         },
         "data_description": {
           "lifetime_offset_p1": "Currently stored offset for input 1. Only change if the value was entered incorrectly or a new reset has occurred. ⚠️ Negative values permanently reduce the displayed lifetime counter by this amount. Correction is possible by reconfiguring again with an adjusted value.",
           "lifetime_offset_p2": "Currently stored offset for input 2. ⚠️ Negative values permanently reduce the displayed lifetime counter by this amount. Correction is possible by reconfiguring again with an adjusted value.",
           "battery_system": "Enable if the inverter is connected to a battery storage system.",
-          "slow_detail_poll": "Voltage, current and temperature are polled every 60 s instead of every cycle. Power and energy sensors are unaffected. Prevents timeout loops on inverters with limited HTTP server capacity (e.g. EZ1-D firmware 2.x)."
+          "slow_detail_poll": "Only applies when extended data polling is enabled above. Voltage, current and temperature are polled every 60 s instead of every cycle. Power and energy sensors are unaffected. Prevents timeout loops on inverters with limited HTTP server capacity (e.g. EZ1-D firmware 2.x).",
+          "detail_poll": "When disabled, only power and energy are polled. Disable if the inverter remains unstable (last resort, especially for EZ1-D with very old firmware)."
         }
       }
     },

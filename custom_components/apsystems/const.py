@@ -36,6 +36,7 @@ STORE_VERSION = 1
 # Enables more frequent power limit verification after morning restart
 # (every 5 min × 10 rounds instead of every 10 min × 5 rounds).
 CONF_BATTERY_SYSTEM = "battery_system"
+CONF_DETAIL_POLL = "detail_poll"       # False → skip getOutputDataDetail entirely
 CONF_SLOW_DETAIL_POLL = "slow_detail_poll"
 
 # Model detection based on the hardware maximum output power (VA) reported

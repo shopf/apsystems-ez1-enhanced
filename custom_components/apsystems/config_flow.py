@@ -13,6 +13,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import (
     CONF_BATTERY_SYSTEM,
+    CONF_DETAIL_POLL,
     CONF_DEVICE_NAME,
     CONF_LIFETIME_OFFSET_P1,
     CONF_LIFETIME_OFFSET_P2,
@@ -88,7 +89,12 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                             CONF_LIFETIME_OFFSET_P1: offset_p1,
                             CONF_LIFETIME_OFFSET_P2: offset_p2,
                             CONF_BATTERY_SYSTEM: user_input.get(CONF_BATTERY_SYSTEM, False),
-                            CONF_SLOW_DETAIL_POLL: user_input.get(CONF_SLOW_DETAIL_POLL, False),
+                            CONF_DETAIL_POLL: user_input.get(CONF_DETAIL_POLL, True),
+                            # Auto-reset slow_detail when detail is disabled
+                            CONF_SLOW_DETAIL_POLL: (
+                                user_input.get(CONF_SLOW_DETAIL_POLL, False)
+                                if user_input.get(CONF_DETAIL_POLL, True) else False
+                            ),
                         },
                     )
 
@@ -108,6 +114,7 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_LIFETIME_OFFSET_P1, default=""): str,
                     vol.Optional(CONF_LIFETIME_OFFSET_P2, default=""): str,
                     vol.Optional(CONF_BATTERY_SYSTEM, default=False): bool,
+                    vol.Optional(CONF_DETAIL_POLL, default=True): bool,
                     vol.Optional(CONF_SLOW_DETAIL_POLL, default=False): bool,
                 }
             ),
@@ -128,6 +135,7 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
         current_p1 = entry.data.get(CONF_LIFETIME_OFFSET_P1, 0.0)
         current_p2 = entry.data.get(CONF_LIFETIME_OFFSET_P2, 0.0)
         current_battery = entry.data.get(CONF_BATTERY_SYSTEM, False)
+        current_detail_poll = entry.data.get(CONF_DETAIL_POLL, True)
         current_slow_detail = entry.data.get(CONF_SLOW_DETAIL_POLL, False)
 
         # Load storage once when the form is first shown (user_input is None).
@@ -183,7 +191,12 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                         CONF_LIFETIME_OFFSET_P1: offset_p1,
                         CONF_LIFETIME_OFFSET_P2: offset_p2,
                         CONF_BATTERY_SYSTEM: user_input.get(CONF_BATTERY_SYSTEM, False),
-                        CONF_SLOW_DETAIL_POLL: user_input.get(CONF_SLOW_DETAIL_POLL, False),
+                        CONF_DETAIL_POLL: user_input.get(CONF_DETAIL_POLL, True),
+                        # Auto-reset slow_detail when detail is disabled
+                        CONF_SLOW_DETAIL_POLL: (
+                            user_input.get(CONF_SLOW_DETAIL_POLL, False)
+                            if user_input.get(CONF_DETAIL_POLL, True) else False
+                        ),
                         # Record what was shown to the user – the coordinator uses
                         # this as the delta reference and removes it after applying.
                         CONF_SHOWN_OFFSET_P1: self._prefill_p1,
@@ -236,6 +249,7 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                         default=prefill_p2_str,
                     ): str,
                     vol.Optional(CONF_BATTERY_SYSTEM, default=current_battery): bool,
+                    vol.Optional(CONF_DETAIL_POLL, default=current_detail_poll): bool,
                     vol.Optional(CONF_SLOW_DETAIL_POLL, default=current_slow_detail): bool,
                 }
             ),

@@ -23,6 +23,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_BATTERY_SYSTEM,
+    CONF_DETAIL_POLL,
     CONF_LIFETIME_OFFSET_P1,
     CONF_LIFETIME_OFFSET_P2,
     CONF_POLLING_INTERVAL,
@@ -293,7 +294,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         )
         # Timestamp when _poll_active was last set to True.
         # Used to detect stuck locks (e.g. after asyncio.CancelledError).
-        self._poll_active_since: float = 0.0
+        self._poll_active_since: float = time.monotonic()
         # Callback registered by sensor platform to dynamically add the
         # flash write count sensor after firmware type is confirmed.
         # Only called once, only when older firmware is detected.
@@ -1104,7 +1105,6 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
 
         finally:
             self._poll_active = False
-            self._poll_active_since = 0.0
 
     async def _get_output_data_detail(self) -> ReturnOutputDataDetail | None:
         """Fetch extended output data from /getOutputDataDetail.
@@ -1118,8 +1118,22 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         try:
             resp = await self.api._request("getOutputDataDetail")
             if resp and resp.get("data"):
-                self._detail_supported = True
                 d = resp["data"]
+                # Auto-detect: some firmware versions (e.g. EZ1-D 1.0.3) respond
+                # with SUCCESS but only return basic output fields (p1, e1, te1 …)
+                # without voltage/current. Stop polling the endpoint in that case.
+                has_detail_fields = any(
+                    d.get(k) not in (None, "", "null") for k in ("v1", "v2", "c1", "c2")
+                )
+                if not has_detail_fields:
+                    LOGGER.debug(
+                        "[%s] getOutputDataDetail response lacks voltage/current fields"
+                        " – marking as unsupported (firmware may not implement it).",
+                        self._log_id,
+                    )
+                    self._detail_supported = False
+                    return None
+                self._detail_supported = True
                 detail = ReturnOutputDataDetail(
                     v1=float(d["v1"]) if d.get("v1") not in (None, "", "null") else None,
                     v2=float(d["v2"]) if d.get("v2") not in (None, "", "null") else None,
@@ -1380,36 +1394,34 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             # and prevents lifetime energy jumps after cold start
             await self._save_state()
 
-        # Decouple getOutputDataDetail from the main poll cycle (optional).
-        # When CONF_SLOW_DETAIL_POLL is enabled, voltage / current / temperature
-        # and grid data are only fetched once per _DETAIL_MIN_INTERVAL seconds.
-        # All other polls serve the last known values from _fallback_detail.
-        # This prevents timeout loops on inverters with limited HTTP server
-        # capacity (observed on EZ1-D firmware 2.2.6).
-        # When the option is disabled (default), detail is fetched on every poll
-        # exactly as before – no behaviour change for existing EZ1-M users.
-        _slow_detail = bool(
-            self.config_entry.data.get(CONF_SLOW_DETAIL_POLL, False)
-        )
-        _now_detail = time.monotonic()
-        _detail_due = (not _slow_detail) or (
-            _now_detail - self._detail_last_ts >= _DETAIL_MIN_INTERVAL
-        )
+        # Extended data polling – three-level control:
+        #   CONF_DETAIL_POLL = False → never call getOutputDataDetail (max stability)
+        #   CONF_DETAIL_POLL = True, CONF_SLOW_DETAIL_POLL = True  → every 60 s
+        #   CONF_DETAIL_POLL = True, CONF_SLOW_DETAIL_POLL = False → every poll
+        _detail_enabled = bool(self.config_entry.data.get(CONF_DETAIL_POLL, True))
+        _slow_detail = bool(self.config_entry.data.get(CONF_SLOW_DETAIL_POLL, False))
 
-        if _detail_due:
-            detail_data = await self._get_output_data_detail()
-            if detail_data is not None:
-                self._detail_last_ts = _now_detail
-                self._fallback_detail = detail_data  # keep cache fresh
-        else:
+        if not _detail_enabled:
             detail_data = None
-            LOGGER.debug(
-                "[%s] getOutputDataDetail skipped (last call %.0fs ago,"
-                " interval %ss) – serving cached detail.",
-                self._log_id,
-                _now_detail - self._detail_last_ts,
-                int(_DETAIL_MIN_INTERVAL),
+        else:
+            _now_detail = time.monotonic()
+            _detail_due = (not _slow_detail) or (
+                _now_detail - self._detail_last_ts >= _DETAIL_MIN_INTERVAL
             )
+            if _detail_due:
+                detail_data = await self._get_output_data_detail()
+                if detail_data is not None:
+                    self._detail_last_ts = _now_detail
+                    self._fallback_detail = detail_data
+            else:
+                detail_data = None
+                LOGGER.debug(
+                    "[%s] getOutputDataDetail skipped (last call %.0fs ago,"
+                    " interval %ss) – serving cached detail.",
+                    self._log_id,
+                    _now_detail - self._detail_last_ts,
+                    int(_DETAIL_MIN_INTERVAL),
+                )
 
         # When detail_data is None (transient error while endpoint IS supported),
         # use the zero-fallback so sensors show 0 instead of "unknown"

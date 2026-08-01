@@ -323,7 +323,10 @@ class ApSystemsDetailSensorEntity(
 
     @property
     def available(self) -> bool:
-        """Return False if firmware does not support getOutputDataDetail."""
+        """Return False if extended data polling is disabled or firmware does not support it."""
+        from .const import CONF_DETAIL_POLL
+        if not self.coordinator.config_entry.data.get(CONF_DETAIL_POLL, True):
+            return False
         if self.coordinator._detail_supported is False:
             return False
         return super().available
