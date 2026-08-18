@@ -134,7 +134,7 @@ Alle Entitätsnamen sind auf Deutsch verfügbar.
 Der EZ1-D (bis 1800W) wird unterstützt. Die Leistungsgrenze wird dynamisch vom Gerät gelesen – der 800W Fallback gilt nur wenn `getDeviceInfo()` keinen Wert liefert.
 
 ### ✨ Automatische Modellerkennung
-Das Gerätemodell (EZ1-M, EZ1-LV, EZ1-H, EZ1D-L, EZ1D, EZ1D-H) wird automatisch anhand der vom Gerät gemeldeten maximalen Leistung (`maxPower`) erkannt und im Gerätenamen angezeigt – kein manuelles Eintragen mehr nötig. Unbekannte Modelle werden einmalig geloggt mit der Bitte, ein Issue mit dem `maxPower`-Wert zu eröffnen, damit das Modell ergänzt werden kann.
+Das Gerätemodell (EZ1-M, EZ1-SPE, EZ1-LV, EZ1-H, EZ1D-L, EZ1D, EZ1D-H) wird automatisch anhand der vom Gerät gemeldeten maximalen Leistung (`maxPower`) erkannt und im Gerätenamen angezeigt – kein manuelles Eintragen mehr nötig. Unbekannte Modelle werden einmalig geloggt mit der Bitte, ein Issue mit dem `maxPower`-Wert zu eröffnen, damit das Modell ergänzt werden kann.
 
 ### ✨ Lifetime-Energie-Offsets
 Im Reconfigure-Dialog kann der Lifetime-Energie-Offset pro Eingang eingetragen werden und jederzeit nachträglich korrigiert werden – etwa wenn ein falscher Wert eingetragen wurde. Negative Werte reduzieren den angezeigten Zähler dauerhaft; ein entsprechender Warnhinweis wird im Formular angezeigt.
@@ -253,6 +253,7 @@ APsystems veröffentlicht keine öffentliche Firmware-Datenbank. Updates sind au
 | EZ1-M | 1.12.2 | ✅ Getestet – Sicherheitslücke geschlossen, empfohlen |
 | EZ1-M | 1.1.2_b | ✅ Behoben (war kaputt in offizieller) |
 | EZ1-M | 2.0.1_B | ✅ Behoben (war kaputt in offizieller) |
+| EZ1-SPE | – | ✅ Unterstützt (automatische Modellerkennung) |
 | EZ1-LV | – | ✅ Unterstützt (automatische Modellerkennung) |
 | EZ1-H | – | ✅ Unterstützt (automatische Modellerkennung) |
 | EZ1-D | – | ✅ Unterstützt (maxPower dynamisch) |
@@ -448,7 +449,7 @@ All entity names are available in German.
 The EZ1-D (up to 1800W) is supported. The power limit is read dynamically from the device – the 800W fallback only applies when `getDeviceInfo()` returns no value.
 
 ### ✨ Automatic model detection
-The device model (EZ1-M, EZ1-LV, EZ1-H, EZ1D-L, EZ1D, EZ1D-H) is automatically detected based on the maximum power (`maxPower`) reported by the device, and shown in the device name – no manual entry needed. Unknown models are logged once, asking the user to open an issue with the `maxPower` value so the model can be added.
+The device model (EZ1-M, EZ1-SPE, EZ1-LV, EZ1-H, EZ1D-L, EZ1D, EZ1D-H) is automatically detected based on the maximum power (`maxPower`) reported by the device, and shown in the device name – no manual entry needed. Unknown models are logged once, asking the user to open an issue with the `maxPower` value so the model can be added.
 
 ### ✨ Lifetime energy offsets
 The lifetime energy offset per input can be entered in the Reconfigure dialog and corrected afterwards at any time – for example if an incorrect value was entered. Negative values permanently reduce the displayed counter; a corresponding warning is shown in the form.
@@ -567,6 +568,7 @@ APsystems does not publish a public firmware database. Updates are only availabl
 | EZ1-M | 1.12.2 | ✅ Tested – security vulnerability closed, recommended |
 | EZ1-M | 1.1.2_b | ✅ Fixed (was broken in official integration) |
 | EZ1-M | 2.0.1_B | ✅ Fixed (was broken in official integration) |
+| EZ1-SPE | – | ✅ Supported (automatic model detection) |
 | EZ1-LV | – | ✅ Supported (automatic model detection) |
 | EZ1-H | – | ✅ Supported (automatic model detection) |
 | EZ1-D | – | ✅ Supported (dynamic maxPower) |

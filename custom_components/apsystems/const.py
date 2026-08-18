@@ -47,10 +47,12 @@ CONF_SLOW_DETAIL_POLL = "slow_detail_poll"
 # (see ApSystemsDataCoordinator._check_known_model) asking the user to
 # open an issue with the reported value, so the table can be extended.
 MODEL_BY_MAX_POWER: dict[int, str] = {
+    500: "EZ1-SPE",
     600: "EZ1-M",
     800: "EZ1-M",
     900: "EZ1-LV",
     960: "EZ1-H",
+    1000: "EZ1-LV",
     1600: "EZ1D-L",
     1800: "EZ1D",
     2000: "EZ1D-H",

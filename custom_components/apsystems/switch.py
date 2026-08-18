@@ -93,15 +93,19 @@ class ApSystemsInverterSwitch(
             return
         try:
             self.coordinator._poll_active = True
+            # Persist user intent before the API call so that a failed command
+            # cannot leave inverter_switch_on = False in storage and trigger the
+            # coordinator's switch-restore loop, which would repeatedly turn the
+            # inverter back off (cycling every ~3 minutes).
+            self.coordinator.inverter_switch_on = True
+            await self.coordinator._save_state()
+            self.async_write_ha_state()
             await self._api.set_device_power_status(1)
             if (
                 self.coordinator.current_max_power is not None
                 and self.coordinator.current_max_power > 0
             ):
                 await self._api.set_max_power(int(self.coordinator.current_max_power))
-            self.coordinator.inverter_switch_on = True
-            self.async_write_ha_state()
-            await self.coordinator._save_state()
         finally:
             self.coordinator._poll_active = False
 

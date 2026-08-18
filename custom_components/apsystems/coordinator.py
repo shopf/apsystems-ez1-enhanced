@@ -24,6 +24,7 @@ from homeassistant.util import dt as dt_util
 from .const import (
     CONF_BATTERY_SYSTEM,
     CONF_DETAIL_POLL,
+    CONF_DEVICE_NAME,
     CONF_LIFETIME_OFFSET_P1,
     CONF_LIFETIME_OFFSET_P2,
     CONF_POLLING_INTERVAL,
@@ -189,6 +190,13 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
     _device_info_retries: int = 0  # counts remaining retries for device info
     default_max_power: int | None = None  # from /getDefaultMaxPower (flash value)
 
+    # Model stabilisation: only accept a new hardware max_power after it has been
+    # confirmed by _HW_MAX_CONFIRM_COUNT consecutive polls.
+    _hw_max_candidate: int | None = None      # new maxPower value seen but not yet confirmed
+    _hw_max_candidate_count: int = 0          # how many polls in a row reported this value
+    _HW_MAX_CONFIRM_COUNT: int = 3            # polls needed before accepting a change
+    _confirmed_hw_max: int | None = None      # last fully confirmed hardware max_power
+
     # Log throttle counters – reset at midnight or when condition clears.
     # Prevents per-poll DEBUG spam during multi-hour firmware-bug windows.
     _e1_carryover_count: int = 0  # increments each poll while carry-over active
@@ -203,6 +211,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
     # starts near zero). Reset to 0.0 on reconnect – by then uptime is
     # always well above 60 s so the first post-outage poll fires immediately.
     _detail_last_ts: float = float("-inf")
+
+    # Tracks which alarm notification IDs are currently active in HA UI.
+    _active_alarm_notifications: set
 
     # Device IP address shown in device info
     device_ip: str = "unknown"
@@ -256,6 +267,9 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         self._last_temperature: float | None = None
         # True once /getOutputDataDetail has succeeded at least once
         self._detail_supported: bool | None = None  # None = not yet tested
+        # True if the inverter ever reported DC input fields (v1/v2/c1/c2).
+        # False means the model does not expose them.
+        self._dc_fields_supported: bool | None = None  # None = not yet seen
 
         # _poll_active prevents concurrent API calls from coordinator, number and
         # switch entities running simultaneously on the same inverter connection.
@@ -303,6 +317,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         # Set to True once an "unknown model" warning has been logged for
         # this coordinator instance, so it is only logged once per HA run.
         self._unknown_model_logged: bool = False
+        self._active_alarm_notifications: set[str] = set()
 
     @property
     def _log_id(self) -> str:
@@ -379,6 +394,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             device_info = await self.api.get_device_info()
             self.api.max_power = getattr(device_info, "maxPower", 800)
             self.api.min_power = getattr(device_info, "minPower", 30)
+            self._confirmed_hw_max = int(self.api.max_power)
             self.device_version = getattr(device_info, "devVer", "unknown")
             self.battery_system = getattr(device_info, "isBatterySystem", False)
             self.device_ip = getattr(device_info, "ipAddr", "unknown")
@@ -394,12 +410,11 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 "[%s] Inverter not reachable during setup – using fallback values. "
                 "Will retry on next poll. Error: %s", self._log_id, _fmt_err(err)
             )
-            # Use hardware maximum as fallback for api.max_power so the number
-            # entity's upper limit is not incorrectly capped at current_max_power.
-            # current_max_power is the USER's chosen limit, not the hardware ceiling.
-            # We use 1800 (EZ1-D ceiling) as the safe fallback so EZ1-D users are
-            # never blocked. The correct value will be set on the next successful poll.
-            self.api.max_power = 1800
+            # Use the confirmed hardware max from storage as fallback for api.max_power
+            # so detected_model stays correct when the inverter is offline at startup.
+            # Fall back to 1800 only if no confirmed value exists yet (first ever run)
+            # so EZ1-D users are never incorrectly blocked to 800W.
+            self.api.max_power = self._confirmed_hw_max if self._confirmed_hw_max is not None else 1800
             self.api.min_power = 30
 
     async def _reset_flash_to_hardware_max(self) -> None:
@@ -587,6 +602,12 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             dmp = data.get("default_max_power")
             if dmp is not None:
                 self.default_max_power = int(dmp)
+            # Restore confirmed hardware max_power so detected_model is correct
+            # even before the first successful getDeviceInfo on this session.
+            hwmp = data.get("confirmed_hw_max")
+            if hwmp is not None:
+                self._confirmed_hw_max = int(hwmp)
+                self.api.max_power = self._confirmed_hw_max
             self.flash_write_count = int(data.get("flash_write_count", 0))
             if self.flash_write_count > 0:
                 self._flash_sensor_registered = False
@@ -605,9 +626,17 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             fb.te2 = float(data.get("fb_te2", 0.0))
 
             self._last_temperature = data.get("fb_temperature")
+            # Restore DC field presence so the startup fallback doesn't show
+            # misleading 0 V / 0 A for models that never report these fields.
+            dc = data.get("fb_dc_fields")
+            if dc is not None:
+                self._dc_fields_supported = bool(dc)
+            _dc = self._dc_fields_supported is not False  # None → assume present until known
             self._fallback_detail = ReturnOutputDataDetail(
-                v1=0.0, v2=0.0,
-                c1=0.0, c2=0.0,
+                v1=0.0 if _dc else None,
+                v2=0.0 if _dc else None,
+                c1=0.0 if _dc else None,
+                c2=0.0 if _dc else None,
                 gv=0.0, gf=0.0,
                 t=self._last_temperature,
             )
@@ -719,6 +748,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 "te1_day_start": self._te1_day_start,
                 "te2_day_start": self._te2_day_start,
                 "current_max_power": self.current_max_power,
+                "confirmed_hw_max": self._confirmed_hw_max,
                 # Persisted so we can detect on offline startup whether the
                 # one-time flash reset to hardware max was already done.
                 "default_max_power": self.default_max_power,
@@ -731,6 +761,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 "fb_te1": fb.te1,
                 "fb_te2": fb.te2,
                 "fb_temperature": self._last_temperature,
+                "fb_dc_fields": self._dc_fields_supported,
                 "device_version": self.device_version,
                 "device_ip": self.device_ip,
             })
@@ -1119,21 +1150,38 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             resp = await self.api._request("getOutputDataDetail")
             if resp and resp.get("data"):
                 d = resp["data"]
-                # Auto-detect: some firmware versions (e.g. EZ1-D 1.0.3) respond
-                # with SUCCESS but only return basic output fields (p1, e1, te1 …)
-                # without voltage/current. Stop polling the endpoint in that case.
+                # Auto-detect: some firmware versions respond with SUCCESS but only
+                # return basic output fields (p1, e1, te1 …) without any extended data.
+                # Stop polling the endpoint in that case.
+                #
+                # Some firmware versions omits DC input fields (v1, v2, c1, c2) but DOES
+                # return grid and temperature fields (gf, gv, t).
+                # That is still valid extended data.
                 has_detail_fields = any(
-                    d.get(k) not in (None, "", "null") for k in ("v1", "v2", "c1", "c2")
+                    d.get(k) not in (None, "", "null")
+                    for k in ("v1", "v2", "c1", "c2", "gf", "gv", "t")
                 )
                 if not has_detail_fields:
                     LOGGER.debug(
-                        "[%s] getOutputDataDetail response lacks voltage/current fields"
+                        "[%s] getOutputDataDetail response contains no extended fields"
                         " – marking as unsupported (firmware may not implement it).",
                         self._log_id,
                     )
                     self._detail_supported = False
                     return None
                 self._detail_supported = True
+                has_dc_fields = any(
+                    d.get(k) not in (None, "", "null") for k in ("v1", "v2", "c1", "c2")
+                )
+                if self._dc_fields_supported is None:
+                    # First successful detail poll – lock in DC field presence.
+                    self._dc_fields_supported = has_dc_fields
+                if not has_dc_fields:
+                    LOGGER.debug(
+                        "[%s] getOutputDataDetail: DC input fields (v1/v2/c1/c2) absent"
+                        " – normal for some firmware versions; grid and temperature sensors still active.",
+                        self._log_id,
+                    )
                 detail = ReturnOutputDataDetail(
                     v1=float(d["v1"]) if d.get("v1") not in (None, "", "null") else None,
                     v2=float(d["v2"]) if d.get("v2") not in (None, "", "null") else None,
@@ -1146,11 +1194,15 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 # Track last known temperature for offline preservation
                 if detail.t is not None:
                     self._last_temperature = detail.t
-                # Update fallback detail with current zeros + last temperature
+                # Update offline fallback. For DC input fields the inverter never
+                # reports, keep None so sensors stay "Unknown" when offline.
                 self._fallback_detail = ReturnOutputDataDetail(
-                    v1=0.0, v2=0.0,
-                    c1=0.0, c2=0.0,
-                    gv=0.0, gf=0.0,
+                    v1=0.0 if detail.v1 is not None else None,
+                    v2=0.0 if detail.v2 is not None else None,
+                    c1=0.0 if detail.c1 is not None else None,
+                    c2=0.0 if detail.c2 is not None else None,
+                    gv=0.0,
+                    gf=0.0,
                     t=self._last_temperature,
                 )
                 return detail
@@ -1163,6 +1215,55 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
                 self._detail_supported = False
         return None
 
+    async def _handle_alarm_notifications(self, alarm_info: ReturnAlarmInfo) -> None:
+        """Create or dismiss HA persistent notifications on alarm state changes."""
+        from homeassistant.components.persistent_notification import (
+            async_create,
+            async_dismiss,
+        )
+
+        device_name = self.config_entry.data.get(CONF_DEVICE_NAME, self._log_id)
+        device_label = f"{device_name} ({self._log_id})"
+        entry_id = self.config_entry.entry_id
+
+        guidance = (
+            "\n\n**Empfohlene Schritte / Recommended steps:**\n"
+            "1. Gerät und angeschlossene Panels überprüfen / "
+            "Check the device and connected panels\n"
+            "2. Wechselrichter stromlos schalten und nach Neustart erneut prüfen / "
+            "Power cycle the inverter and verify after restart\n"
+            "3. Wenn der Fehler bestehen bleibt: APsystems Support kontaktieren / "
+            "If the problem persists, contact APsystems support"
+        )
+
+        alarms = {
+            f"apsystems_{entry_id}_sc1": (
+                getattr(alarm_info, "shortcircuit_1", False),
+                f"⚠️ {device_label} – Kurzschluss an Eingang 1 / Short circuit on Input 1",
+                f"Kurzschluss an Eingang 1 erkannt.\nShort circuit detected on Input 1.{guidance}",
+            ),
+            f"apsystems_{entry_id}_sc2": (
+                getattr(alarm_info, "shortcircuit_2", False),
+                f"⚠️ {device_label} – Kurzschluss an Eingang 2 / Short circuit on Input 2",
+                f"Kurzschluss an Eingang 2 erkannt.\nShort circuit detected on Input 2.{guidance}",
+            ),
+            f"apsystems_{entry_id}_grid": (
+                getattr(alarm_info, "offgrid", False),
+                f"⚠️ {device_label} – Netzausfall / Grid failure",
+                f"Netzausfall erkannt.\nGrid failure detected.{guidance}",
+            ),
+        }
+
+        for notif_id, (is_active, title, message) in alarms.items():
+            if is_active and notif_id not in self._active_alarm_notifications:
+                async_create(self.hass, message, title=title, notification_id=notif_id)
+                self._active_alarm_notifications.add(notif_id)
+                LOGGER.debug("[%s] Alarm notification created: %s", self._log_id, notif_id)
+            elif not is_active and notif_id in self._active_alarm_notifications:
+                async_dismiss(self.hass, notif_id)
+                self._active_alarm_notifications.discard(notif_id)
+                LOGGER.debug("[%s] Alarm notification dismissed: %s", self._log_id, notif_id)
+
     async def _do_fetch(self) -> ApSystemsSensorData:
         """Perform the actual API calls and return sensor data."""
         output_data = await self.api.get_output_data()
@@ -1171,6 +1272,7 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
         self._poll_count += 1
         if self._poll_count % _ALARM_POLL_INTERVAL == 1:
             alarm_info = await self.api.get_alarm_info()
+            await self._handle_alarm_notifications(alarm_info)
             self._fallback_data = ApSystemsSensorData(
                 output_data=self._fallback_data.output_data,
                 alarm_info=alarm_info,
@@ -1189,11 +1291,42 @@ class ApSystemsDataCoordinator(DataUpdateCoordinator[ApSystemsSensorData]):
             if self._poll_count_device % 5 == 1:
                 try:
                     device_info = await self.api.get_device_info()
-                    self.api.max_power = getattr(device_info, "maxPower", 800)
+                    new_hw_max = int(getattr(device_info, "maxPower", 800))
                     self.api.min_power = getattr(device_info, "minPower", 30)
                     self.device_version = getattr(device_info, "devVer", "unknown")
                     self.battery_system = getattr(device_info, "isBatterySystem", False)
                     self.device_ip = getattr(device_info, "ipAddr", "unknown")
+
+                    # A new maxPower value is only adopted when _HW_MAX_CONFIRM_COUNT
+                    # consecutive queries return the same value. Prevents misdetection
+                    # when the inverter returns a wrong value during the first seconds
+                    # after a crash/battery restart.
+                    if self._confirmed_hw_max is None:
+                        # No confirmed value yet → accept immediately (initial setup)
+                        self._confirmed_hw_max = new_hw_max
+                        self.api.max_power = new_hw_max
+                    elif new_hw_max != self._confirmed_hw_max:
+                        if new_hw_max == self._hw_max_candidate:
+                            self._hw_max_candidate_count += 1
+                            if self._hw_max_candidate_count >= self._HW_MAX_CONFIRM_COUNT:
+                                LOGGER.debug(
+                                    "[%s] Hardware max_power changed: %sW → %sW"
+                                    " (confirmed after %d polls).",
+                                    self._log_id, self._confirmed_hw_max, new_hw_max,
+                                    self._HW_MAX_CONFIRM_COUNT,
+                                )
+                                self._confirmed_hw_max = new_hw_max
+                                self.api.max_power = new_hw_max
+                                self._hw_max_candidate = None
+                                self._hw_max_candidate_count = 0
+                        else:
+                            self._hw_max_candidate = new_hw_max
+                            self._hw_max_candidate_count = 1
+                    else:
+                        # Consistent with confirmed value → reset candidate counter
+                        self._hw_max_candidate = None
+                        self._hw_max_candidate_count = 0
+                        self.api.max_power = self._confirmed_hw_max
                     if self.device_version != "unknown":
                         LOGGER.debug(
                             "[%s] Inverter info retrieved – firmware: %s",

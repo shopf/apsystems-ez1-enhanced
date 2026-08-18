@@ -78,16 +78,14 @@ class ApSystemsMaxPowerNumber(
 
     @property
     def available(self) -> bool:
-        """Return False when the inverter is offline or not operating.
+        """Return True as long as coordinator data exists.
 
-        Prevents setting a power limit when the EZ1 cannot act on it.
-        The last known limit remains stored and is restored on reconnect.
+        The entity stays visible with its last known value even when the
+        inverter is offline. Writing is blocked separately in
+        async_set_native_value so the user sees the cached limit (e.g. 600 W)
+        but cannot change it until the inverter is back online.
         """
-        if not self.coordinator.inverter_reachable:
-            return False
-        if self.coordinator.data is not None:
-            return self.coordinator.data.alarm_info.operating
-        return False
+        return self.coordinator.data is not None
 
     async def async_set_native_value(self, value: float) -> None:
         """Set a new power limit via setMaxPower (RAM only).
@@ -98,6 +96,12 @@ class ApSystemsMaxPowerNumber(
         flash longevity. HA stores the desired limit and restores it each
         morning via setMaxPower when the inverter reloads flash into RAM.
         """
+        if not self.coordinator.inverter_reachable:
+            raise HomeAssistantError(
+                "Cannot change power limit – inverter is currently offline. "
+                "The last known limit is displayed and will be restored automatically "
+                "when the inverter comes back online."
+            )
         min_p = self.native_min_value
         max_p = self.native_max_value
 
