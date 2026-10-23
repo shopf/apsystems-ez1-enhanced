@@ -158,14 +158,14 @@ Im Reconfigure-Dialog kann der Lifetime-Energie-Offset pro Eingang eingetragen w
 | Entität | Beschreibung | Einheit |
 |---------|-------------|---------|
 | `sensor.{name}_gesamtleistung` | Gesamtleistung (kombiniert) | W |
-| `sensor.{name}_leistung_eingang_1` | Leistung PV-Eingang 1 | W |
-| `sensor.{name}_leistung_eingang_2` | Leistung PV-Eingang 2 | W |
-| `sensor.{name}_energie_heute` | Energie heute (kombiniert) | kWh |
-| `sensor.{name}_energie_heute_eingang_1` | Energie heute – Eingang 1 | kWh |
-| `sensor.{name}_energie_heute_eingang_2` | Energie heute – Eingang 2 | kWh |
-| `sensor.{name}_energie_gesamt` | Energie Gesamt (kombiniert) | kWh |
-| `sensor.{name}_energie_gesamt_eingang_1` | Energie Gesamt – Eingang 1 | kWh |
-| `sensor.{name}_energie_gesamt_eingang_2` | Energie Gesamt – Eingang 2 | kWh |
+| `sensor.{name}_leistung_von_p1` | Leistung PV-Eingang 1 | W |
+| `sensor.{name}_leistung_von_p2` | Leistung PV-Eingang 2 | W |
+| `sensor.{name}_heutige_erzeugung` | Erzeugung heute (kombiniert) | kWh |
+| `sensor.{name}_heutige_erzeugung_von_p1` | Erzeugung heute – Eingang 1 | kWh |
+| `sensor.{name}_heutige_erzeugung_von_p2` | Erzeugung heute – Eingang 2 | kWh |
+| `sensor.{name}_gesamterzeugung_uber_lebensdauer` | Gesamterzeugung über Lebensdauer (kombiniert) | kWh |
+| `sensor.{name}_erzeugung_von_p1_uber_lebensdauer` | Gesamterzeugung über Lebensdauer – Eingang 1 | kWh |
+| `sensor.{name}_erzeugung_von_p2_uber_lebensdauer` | Gesamterzeugung über Lebensdauer – Eingang 2 | kWh |
 | `sensor.{name}_dc_spannung_p1` | DC-Spannung PV-Eingang 1 (Diagnose) | V |
 | `sensor.{name}_dc_spannung_p2` | DC-Spannung PV-Eingang 2 (Diagnose) | V |
 | `sensor.{name}_dc_strom_p1` | DC-Strom PV-Eingang 1 (Diagnose) | A |
@@ -177,9 +177,9 @@ Im Reconfigure-Dialog kann der Lifetime-Energie-Offset pro Eingang eingetragen w
 | `binary_sensor.{name}_kurzschluss_eingang_1` | Kurzschluss Eingang 1 (Diagnose) | – |
 | `binary_sensor.{name}_kurzschluss_eingang_2` | Kurzschluss Eingang 2 (Diagnose) | – |
 | `sensor.{name}_firmware_version` | Firmware-Version (Diagnose) | – |
-| `sensor.{name}_flash_schreibzugriffe` | Flash-Schreibzugriffe (Diagnose) | – |
+| `sensor.{name}_flash_schreibvorgange` | Flash-Schreibvorgänge (Diagnose) | – |
 | `binary_sensor.{name}_wechselrichter_aktiv` | In Betrieb / Ausgeschaltet (Diagnose) | – |
-| `number.{name}_leistungsbegrenzung` | Maximale Ausgangsleistung (30–800W / 30–1800W beim EZ1-D) | W |
+| `number.{name}_leistungsbegrenzung` | Maximale Ausgangsleistung (30–800W / 60–1800W beim EZ1-D) | W |
 | `switch.{name}_wechselrichter` | Wechselrichter Ein/Aus | – |
 
 ---
@@ -218,7 +218,8 @@ Diese Integration ersetzt die offizielle HA APsystems Integration automatisch �
 
 HA erkennt automatisch dass beide Integrationen denselben Domain-Namen `apsystems` verwenden und zeigt unsere als Ersatz an. **Entity-IDs, Verlauf und Statistiken bleiben vollständig erhalten** da die `unique_id` auf der Seriennummer des Inverters basiert.
 
-> ℹ️ Die Migration von der **Sonnenladen Community Integration** (`apsystemsapi_local`) ist leider nicht nahtlos möglich da diese einen anderen Domain-Namen verwendet. In diesem Fall gehen Statistiken verloren – ein automatischer Migrationspfad ist für eine zukünftige Version geplant.
+> 📦 **Migration von der Sonnenladen Community Integration** (`apsystemsapi_local`)
+> Da diese einen anderen Domain-Namen verwendet, sind Entity-IDs, Verlauf und Statistiken ohne zusätzliche Schritte nicht übertragbar. Das Repository enthält im Ordner `tools/` ein Migrationsskript (`migrate_apsystems.py`) und eine ausführliche Anleitung (`MIGRATION.md`) die den Prozess vollautomatisch und ohne Datenverlust durchführt – inklusive automatischem Backup vor jeder Änderung.
 
 ---
 
@@ -485,30 +486,30 @@ The lifetime energy offset per input can be entered in the Reconfigure dialog an
 
 | Entity | Description | Unit |
 |---------|-------------|---------|
-| `sensor.{name}_gesamtleistung` | Total power (combined) | W |
-| `sensor.{name}_leistung_eingang_1` | Power PV input 1 | W |
-| `sensor.{name}_leistung_eingang_2` | Power PV input 2 | W |
-| `sensor.{name}_energie_heute` | Energy today (combined) | kWh |
-| `sensor.{name}_energie_heute_eingang_1` | Energy today – input 1 | kWh |
-| `sensor.{name}_energie_heute_eingang_2` | Energy today – input 2 | kWh |
-| `sensor.{name}_energie_gesamt` | Total energy (combined) | kWh |
-| `sensor.{name}_energie_gesamt_eingang_1` | Total energy – input 1 | kWh |
-| `sensor.{name}_energie_gesamt_eingang_2` | Total energy – input 2 | kWh |
-| `sensor.{name}_dc_spannung_p1` | DC voltage PV input 1 (diagnostic) | V |
-| `sensor.{name}_dc_spannung_p2` | DC voltage PV input 2 (diagnostic) | V |
-| `sensor.{name}_dc_strom_p1` | DC current PV input 1 (diagnostic) | A |
-| `sensor.{name}_dc_strom_p2` | DC current PV input 2 (diagnostic) | A |
-| `sensor.{name}_wechselrichter_temperatur` | Inverter temperature (diagnostic) | °C |
-| `sensor.{name}_netzfrequenz` | Grid frequency (diagnostic) | Hz |
-| `sensor.{name}_netzspannung` | Grid voltage (diagnostic) | V |
-| `binary_sensor.{name}_netzausfall` | Grid outage alarm (diagnostic) | – |
-| `binary_sensor.{name}_kurzschluss_eingang_1` | Short circuit input 1 (diagnostic) | – |
-| `binary_sensor.{name}_kurzschluss_eingang_2` | Short circuit input 2 (diagnostic) | – |
+| `sensor.{name}_total_output_power` | Total output power (combined) | W |
+| `sensor.{name}_power_from_p1` | Power from P1 | W |
+| `sensor.{name}_power_from_p2` | Power from P2 | W |
+| `sensor.{name}_today_s_production` | Today's production (combined) | kWh |
+| `sensor.{name}_production_from_p1_today` | Production from P1 today | kWh |
+| `sensor.{name}_production_from_p2_today` | Production from P2 today | kWh |
+| `sensor.{name}_total_production_over_lifetime` | Total production over lifetime (combined) | kWh |
+| `sensor.{name}_production_from_p1_over_lifetime` | Production from P1 over lifetime | kWh |
+| `sensor.{name}_production_from_p2_over_lifetime` | Production from P2 over lifetime | kWh |
+| `sensor.{name}_dc_voltage_p1` | DC Voltage P1 (diagnostic) | V |
+| `sensor.{name}_dc_voltage_p2` | DC Voltage P2 (diagnostic) | V |
+| `sensor.{name}_dc_current_p1` | DC Current P1 (diagnostic) | A |
+| `sensor.{name}_dc_current_p2` | DC Current P2 (diagnostic) | A |
+| `sensor.{name}_inverter_temperature` | Inverter Temperature (diagnostic) | °C |
+| `sensor.{name}_grid_frequency` | Grid Frequency (diagnostic) | Hz |
+| `sensor.{name}_grid_voltage` | Grid Voltage (diagnostic) | V |
+| `binary_sensor.{name}_grid_fault` | Grid fault (diagnostic) | – |
+| `binary_sensor.{name}_dc_1_short_circuit` | DC 1 short circuit (diagnostic) | – |
+| `binary_sensor.{name}_dc_2_short_circuit` | DC 2 short circuit (diagnostic) | – |
 | `sensor.{name}_firmware_version` | Firmware version (diagnostic) | – |
-| `sensor.{name}_flash_write_count` | Flash write count (diagnostic) | – |
-| `binary_sensor.{name}_wechselrichter_aktiv` | Running / Off (diagnostic) | – |
-| `number.{name}_leistungsbegrenzung` | Maximum output power (30–800W / 30–1800W on EZ1-D) | W |
-| `switch.{name}_wechselrichter` | Inverter on/off | – |
+| `sensor.{name}_flash_write_count` | Flash Write Count (diagnostic) | – |
+| `binary_sensor.{name}_inverter_active` | Running / Off (diagnostic) | – |
+| `number.{name}_max_output` | Maximum output power (30–800W / 60–1800W on EZ1-D) | W |
+| `switch.{name}_inverter` | Inverter on/off | – |
 
 ---
 
@@ -546,7 +547,8 @@ This integration automatically replaces the official HA APsystems integration �
 
 HA automatically detects that both integrations use the same domain name `apsystems` and shows ours as the replacement. **Entity IDs, history, and statistics are fully preserved** since the `unique_id` is based on the inverter's serial number.
 
-> ℹ️ Migration from the **Sonnenladen Community Integration** (`apsystemsapi_local`) is unfortunately not seamless since it uses a different domain name. In this case, statistics are lost – an automatic migration path is planned for a future version.
+> 📦 **Migration from the Sonnenladen Community Integration** (`apsystemsapi_local`)
+> Since it uses a different domain name, entity IDs, history and statistics are not carried over without additional steps. The repository includes a migration script (`migrate_apsystems.py`) and detailed guide (`MIGRATION.md`) in the `tools/` folder that handles the entire process automatically and without data loss – including an automatic backup before any changes are made.
 
 ---
 

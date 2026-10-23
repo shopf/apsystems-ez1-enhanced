@@ -12,6 +12,7 @@ from homeassistant.const import CONF_IP_ADDRESS, CONF_PORT
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
+from .api_errors import DEVICE_ERRORS
 from .const import (
     CONF_BATTERY_SYSTEM,
     CONF_DETAIL_POLL,
@@ -81,7 +82,7 @@ class ApSystemsFlowHandler(ConfigFlow, domain=DOMAIN):
                 )
                 try:
                     device_info = await api.get_device_info()
-                except Exception:  # noqa: BLE001
+                except DEVICE_ERRORS:
                     errors["base"] = "cannot_connect"
                 else:
                     uid = device_info.deviceId

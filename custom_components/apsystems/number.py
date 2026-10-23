@@ -15,6 +15,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .api_errors import DEVICE_ERRORS
 from .const import LOGGER
 from .coordinator import ApSystemsConfigEntry, ApSystemsData, ApSystemsDataCoordinator
 from .entity import ApSystemsEntity
@@ -144,7 +145,7 @@ class ApSystemsMaxPowerNumber(
                         "(This warning appears at most once per day.)",
                         int(value),
                     )
-        except Exception as err:  # noqa: BLE001
+        except DEVICE_ERRORS as err:
             LOGGER.error("Failed to set power limit to %sW: %s", value, err)
             raise HomeAssistantError(
                 f"Could not set power limit to {value}W: {err}"
